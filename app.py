@@ -555,8 +555,31 @@ class LiveEngine:
                 return
 
             for r in resolved:
-                src = next((p for p in open_positions
-                            if p["Symbol"] == r["symbol"] and p["Exchange"] == r["exchange"]), {})
+                # Match back to the original open_positions entry using
+                # Exchange + Qty + AvgPrice rather than Symbol. Angel One's
+                # instrument-master resolution returns the FULL contract
+                # tradingsymbol for F&O (e.g. "NIFTY28APR2622500CE"), which
+                # never equals the bare underlying symbol ("NIFTY") that
+                # positions_builder.py stores — so a Symbol-based match
+                # always missed for F&O and silently blanked out Expiry,
+                # Segment, and PositionType for every F&O row. Qty/AvgPrice
+                # are copied through resolve_all unchanged from the input
+                # position, so they're a reliable join key; Symbol is kept
+                # as a secondary check only for Equity, where it's still
+                # accurate and helps disambiguate ties.
+                def _matches(p, r=r):
+                    same_exch = p["Exchange"] == r["exchange"]
+                    same_qty = abs(float(p.get("Qty") or 0)) == abs(float(r.get("qty") or 0))
+                    avg_p, avg_r = p.get("AvgPrice"), r.get("avgPrice")
+                    same_avg = avg_p is not None and avg_r is not None and round(float(avg_p), 2) == round(float(avg_r), 2)
+                    return same_exch and same_qty and same_avg
+
+                src = next((p for p in open_positions if _matches(p)), {})
+                if not src:
+                    # Fall back to the old Symbol+Exchange match (covers
+                    # Equity, where symbol formats do line up).
+                    src = next((p for p in open_positions
+                                if p["Symbol"] == r["symbol"] and p["Exchange"] == r["exchange"]), {})
                 self.token_to_symbol[r["token"]] = {
                     "symbol": r["symbol"], "exchange": r["exchange"],
                     "qty": r.get("qty"), "avgPrice": r.get("avgPrice"),
