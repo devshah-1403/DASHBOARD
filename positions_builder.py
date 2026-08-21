@@ -63,8 +63,7 @@ def _norm(v):
     return str(v).strip().upper()
 
 
-def load_trade_ledger(path):
-    df = pd.read_excel(path)
+def _normalize_ledger_df(df):
     df.columns = [c.strip().lower() for c in df.columns]
     df = df.rename(columns={k: v for k, v in COLUMN_MAP.items() if k in df.columns})
 
@@ -80,6 +79,21 @@ def load_trade_ledger(path):
         raise ValueError("Trade ledger is missing required column: Quantity")
 
     return df.to_dict(orient="records")
+
+
+def load_trade_ledger(path):
+    df = pd.read_excel(path)
+    return _normalize_ledger_df(df)
+
+
+def load_trade_ledger_from_records(records):
+    """Same shape as load_trade_ledger but for already-parsed JSON — e.g.
+    the array of row-objects returned by the Apps Script Web App
+    (doGet in Code.gs). `records` is a list of dicts keyed by the
+    sheet's header row, exactly like requests.get(url).json() gives you.
+    """
+    df = pd.DataFrame.from_records(records)
+    return _normalize_ledger_df(df)
 
 
 def _contract_key(row):
