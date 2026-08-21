@@ -562,6 +562,10 @@ class LiveEngine:
                     "qty": r.get("qty"), "avgPrice": r.get("avgPrice"),
                     "segment": src.get("Segment", "Other"),
                     "positionType": src.get("PositionType", "LONG"),
+                    # Expiry may come back from the instrument-master lookup
+                    # (F&O tokens resolve with an expiry) or from the ledger
+                    # row itself, depending on which one has it.
+                    "expiry": r.get("expiry") or src.get("Expiry") or src.get("ExpiryDate") or "",
                 }
 
             totp = pyotp.TOTP(st.secrets["ANGEL_TOTP_SECRET"]).now()
@@ -621,7 +625,7 @@ class LiveEngine:
                 tick = {
                     "token": token, "symbol": meta.get("symbol", token),
                     "exchange": meta.get("exchange", ""), "segment": meta.get("segment", "Other"),
-                    "positionType": meta.get("positionType", "LONG"), "ltp": ltp,
+                    "positionType": meta.get("positionType", "LONG"), "expiry": meta.get("expiry", ""), "ltp": ltp,
                     "prev_ltp": prev.get("ltp"),
                     "close": (message.get("closed_price", 0) / 100.0 if message.get("closed_price") else prev.get("close")),
                     "open": (message.get("open_price_of_the_day", 0) / 100.0 if message.get("open_price_of_the_day") else prev.get("open")),
@@ -706,6 +710,23 @@ def fmt_sell_date(d):
         return d.strftime("%d %b %Y")
     except AttributeError:
         return str(d)
+
+
+def fmt_expiry(e):
+    """e may be a date/datetime object or a string like '25AUG2026'/'2026-08-25'."""
+    if not e:
+        return "-"
+    if isinstance(e, str):
+        for pattern in ("%d%b%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
+            try:
+                return datetime.strptime(e, pattern).strftime("%d %b %Y")
+            except ValueError:
+                continue
+        return e  # unrecognized format — show as-is rather than hide it
+    try:
+        return e.strftime("%d %b %Y")
+    except AttributeError:
+        return str(e)
 
 
 def alt_dark(chart):
@@ -887,6 +908,10 @@ def render_live(engine: "LiveEngine"):
                 pos_type = (x.get("positionType") or "LONG").upper()
                 return raw_pct if pos_type == "LONG" else -raw_pct
 
+            # F&O positions care about expiry more than exchange (it's
+            # always NFO/BFO); Equity/Other show exchange as before.
+            second_col_label = "Expiry" if label == "F&O" else "Exchange"
+
             # Highest daily gain first, always — never a fixed/pinned order.
             # Positions with no price yet (None) sort to the bottom.
             rows_html = []
@@ -916,6 +941,7 @@ def render_live(engine: "LiveEngine"):
                 mtm = r.get("mtm")
                 mtm_cls = "pt-cell pos" if (mtm or 0) >= 0 else "pt-cell neg"
                 mtm_arrow = "▲" if (mtm or 0) >= 0 else "▼"
+                second_col_value = fmt_expiry(r.get("expiry")) if label == "F&O" else r.get("exchange", "-")
                 rows_html.append(flat(f"""
                     <div class="{row_cls}">
                         <div class="pt-symbol">
@@ -923,7 +949,7 @@ def render_live(engine: "LiveEngine"):
                             <span class="pt-tag {type_cls}">{pos_type}</span>
                             {leader_badge}
                         </div>
-                        <div class="pt-cell muted">{r.get('exchange', '-')}</div>
+                        <div class="pt-cell muted">{second_col_value}</div>
                         <div class="pt-cell">{fmt_qty(r.get('qty'))}</div>
                         <div class="pt-cell">{fmt_money(r.get('avgPrice'))}</div>
                         <div class="pt-cell">{fmt_money(r.get('ltp'))}</div>
@@ -936,7 +962,7 @@ def render_live(engine: "LiveEngine"):
                 <div class="pos-table-wrap">
                     <div class="pos-table">
                         <div class="pos-table-head cols-open">
-                            <div>Symbol</div><div>Exchange</div><div>Qty</div>
+                            <div>Symbol</div><div>{second_col_label}</div><div>Qty</div>
                             <div>Avg Price</div><div>CMP</div><div>Day Chg %</div>
                             <div>MTM P&amp;L</div><div>Last Tick</div>
                         </div>
