@@ -353,7 +353,7 @@ def inject_theme():
             padding: 1px 8px; border-radius: 999px; text-transform: uppercase;
             background: linear-gradient(90deg, #ff3cac, #784ba0, #2b86c5, #2ee6a6);
             background-size: 300% 100%; animation: rgb-shift 3s linear infinite;
-            color: #05070d;
+            color: #05070d; white-space: nowrap; flex-shrink: 0;
         }
 
         /* Chart cards: st.markdown('<div class="chart-card">') + st.altair_chart(...) +
