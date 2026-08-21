@@ -140,14 +140,19 @@ def inject_theme():
         .kpi-card {
             background: linear-gradient(180deg, var(--panel-2), var(--panel));
             border: 1px solid var(--border); border-radius: 16px; padding: 18px 20px;
-            position: relative; overflow: hidden;
+            position: relative;
+            container-type: inline-size; /* lets kpi-value size off THIS card's actual width */
         }
         .kpi-card::before {
             content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px;
             background: linear-gradient(90deg, var(--accent), var(--accent-2)); opacity: 0.85;
+            border-radius: 16px 16px 0 0; /* rounds the bar itself now that the card no longer clips overflow */
         }
         .kpi-label { font-size: 0.74rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 8px; white-space: nowrap; }
-        .kpi-value { font-family: 'JetBrains Mono', monospace; font-size: clamp(0.95rem, 2.1vw, 1.55rem); font-weight: 700; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+        /* cqw = % of this card's own width, so the value shrinks exactly as much as its
+           card needs regardless of how many KPI cards share the row. No overflow/ellipsis
+           here on purpose — a clipped digit on a money figure is worse than a smaller font. */
+        .kpi-value { font-family: 'JetBrains Mono', monospace; font-size: clamp(0.72rem, 8.5cqw, 1.55rem); font-weight: 700; letter-spacing: -0.01em; white-space: nowrap; display: block; }
         .kpi-pos { color: var(--pos); }
         .kpi-neg { color: var(--neg); }
         .kpi-sub { font-size: 0.72rem; color: var(--muted); margin-top: 6px; font-family: 'JetBrains Mono', monospace; }
@@ -224,7 +229,8 @@ def inject_theme():
         .pos-tick { font-size: 0.66rem; color: var(--muted); font-family: 'JetBrains Mono', monospace; }
 
         /* Closed position cards */
-        .closed-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; margin-bottom: 20px; }
+        .closed-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 20px; }
+        @media (max-width: 640px) { .closed-grid { grid-template-columns: 1fr; } }
         .closed-card {
             background: linear-gradient(180deg, var(--panel-2), var(--panel));
             border: 1px solid var(--border); border-radius: 14px; padding: 13px 15px;
@@ -238,10 +244,17 @@ def inject_theme():
         .closed-rows { display: flex; justify-content: space-between; font-size: 0.72rem; color: var(--muted); margin-bottom: 4px; font-family: 'JetBrains Mono', monospace; }
         .closed-pnl { font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 0.95rem; margin-top: 8px; }
 
-        .chart-card {
-            background: var(--panel-2); border: 1px solid var(--border); border-radius: 14px;
-            padding: 16px 18px 6px 18px; margin-bottom: 18px;
+        /* Chart cards: st.markdown('<div class="chart-card">') + st.altair_chart(...) +
+           st.markdown('</div>') used to be 3 SEPARATE calls — Streamlit renders each call
+           as its own DOM node, so that div opened and closed empty and the real chart sat
+           outside it, unstyled. Charts now render inside `with st.container(border=True):`,
+           which is a genuine parent element, and we restyle Streamlit's own wrapper for it
+           below so it matches the rest of the theme instead of Streamlit's default grey box. */
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            background: var(--panel-2) !important; border: 1px solid var(--border) !important;
+            border-radius: 14px !important; margin-bottom: 18px !important;
         }
+        div[data-testid="stVerticalBlockBorderWrapper"] > div { border-radius: 14px !important; }
 
         /* Dataframe polish (still used where a raw table makes sense) */
         div[data-testid="stDataFrame"] {
@@ -678,24 +691,23 @@ def render_live(engine: "LiveEngine"):
             if legs:
                 chart_df = pd.DataFrame(legs).sort_values("SellDate")
                 chart_df["Cumulative"] = chart_df["Pnl"].cumsum()
-                st.markdown('<div class="chart-card">', unsafe_allow_html=True)
-                st.markdown('<div class="section-label">Cumulative booked profit over time</div>', unsafe_allow_html=True)
-                area = alt.Chart(chart_df).mark_area(
-                    line={"color": "#34d5c8", "strokeWidth": 2},
-                    interpolate="monotone",
-                    fillOpacity=0.15,
-                    color=alt.Gradient(
-                        gradient="linear",
-                        stops=[alt.GradientStop(color="#34d5c8", offset=0), alt.GradientStop(color="transparent", offset=1)],
-                        x1=1, x2=1, y1=1, y2=0,
-                    ),
-                ).encode(
-                    x=alt.X("SellDate:T", title=None),
-                    y=alt.Y("Cumulative:Q", title="Cumulative ₹"),
-                    tooltip=[alt.Tooltip("SellDate:T", title="Date"), alt.Tooltip("Cumulative:Q", title="Cumulative", format=",.0f")],
-                ).properties(height=240)
-                st.altair_chart(alt_dark(area), use_container_width=True)
-                st.markdown('</div>', unsafe_allow_html=True)
+                with st.container(border=True):
+                    st.markdown('<div class="section-label">Cumulative booked profit over time</div>', unsafe_allow_html=True)
+                    area = alt.Chart(chart_df).mark_area(
+                        line={"color": "#34d5c8", "strokeWidth": 2},
+                        interpolate="monotone",
+                        fillOpacity=0.15,
+                        color=alt.Gradient(
+                            gradient="linear",
+                            stops=[alt.GradientStop(color="#34d5c8", offset=0), alt.GradientStop(color="transparent", offset=1)],
+                            x1=1, x2=1, y1=1, y2=0,
+                        ),
+                    ).encode(
+                        x=alt.X("SellDate:T", title=None),
+                        y=alt.Y("Cumulative:Q", title="Cumulative ₹"),
+                        tooltip=[alt.Tooltip("SellDate:T", title="Date"), alt.Tooltip("Cumulative:Q", title="Cumulative", format=",.0f")],
+                    ).properties(height=240)
+                    st.altair_chart(alt_dark(area), use_container_width=True)
             else:
                 st.caption("No sell-dated trade legs available yet to plot a cumulative profit trend.")
 
@@ -705,36 +717,34 @@ def render_live(engine: "LiveEngine"):
             top_df = top_df.sort_values("AbsPnl", ascending=False).head(12).drop(columns="AbsPnl")
             top_df["Direction"] = top_df["BookedPnL"].apply(lambda v: "Profit" if v >= 0 else "Loss")
 
-            st.markdown('<div class="chart-card">', unsafe_allow_html=True)
-            st.markdown('<div class="section-label">Biggest movers — booked P&amp;L</div>', unsafe_allow_html=True)
-            bar = alt.Chart(top_df).mark_bar(cornerRadiusEnd=4).encode(
-                x=alt.X("BookedPnL:Q", title="Booked P&L (₹)"),
-                y=alt.Y("Symbol:N", sort="-x", title=None),
-                color=alt.Color(
-                    "Direction:N",
-                    scale=alt.Scale(domain=["Profit", "Loss"], range=["#2ee6a6", "#ff5c7a"]),
-                    legend=None,
-                ),
-                tooltip=[alt.Tooltip("Symbol:N"), alt.Tooltip("BookedPnL:Q", title="Booked P&L", format=",.0f")],
-            ).properties(height=max(220, 24 * len(top_df)))
-            st.altair_chart(alt_dark(bar), use_container_width=True)
-            st.markdown('</div>', unsafe_allow_html=True)
+            with st.container(border=True):
+                st.markdown('<div class="section-label">Biggest movers — booked P&amp;L</div>', unsafe_allow_html=True)
+                bar = alt.Chart(top_df).mark_bar(cornerRadiusEnd=4).encode(
+                    x=alt.X("BookedPnL:Q", title="Booked P&L (₹)"),
+                    y=alt.Y("Symbol:N", sort="-x", title=None),
+                    color=alt.Color(
+                        "Direction:N",
+                        scale=alt.Scale(domain=["Profit", "Loss"], range=["#2ee6a6", "#ff5c7a"]),
+                        legend=None,
+                    ),
+                    tooltip=[alt.Tooltip("Symbol:N"), alt.Tooltip("BookedPnL:Q", title="Booked P&L", format=",.0f")],
+                ).properties(height=max(220, 24 * len(top_df)))
+                st.altair_chart(alt_dark(bar), use_container_width=True)
 
             # ── Chart 3: win rate donut ─────────────────────────────────────
             win_df = pd.DataFrame({"Outcome": ["Profitable", "Loss-making"], "Count": [wins, losses]})
-            st.markdown('<div class="chart-card">', unsafe_allow_html=True)
-            st.markdown('<div class="section-label">Win / loss split</div>', unsafe_allow_html=True)
-            donut = alt.Chart(win_df).mark_arc(innerRadius=65, cornerRadius=3).encode(
-                theta=alt.Theta("Count:Q"),
-                color=alt.Color(
-                    "Outcome:N",
-                    scale=alt.Scale(domain=["Profitable", "Loss-making"], range=["#2ee6a6", "#ff5c7a"]),
-                    legend=alt.Legend(orient="right", title=None),
-                ),
-                tooltip=[alt.Tooltip("Outcome:N"), alt.Tooltip("Count:Q")],
-            ).properties(height=220)
-            st.altair_chart(alt_dark(donut), use_container_width=True)
-            st.markdown('</div>', unsafe_allow_html=True)
+            with st.container(border=True):
+                st.markdown('<div class="section-label">Win / loss split</div>', unsafe_allow_html=True)
+                donut = alt.Chart(win_df).mark_arc(innerRadius=65, cornerRadius=3).encode(
+                    theta=alt.Theta("Count:Q"),
+                    color=alt.Color(
+                        "Outcome:N",
+                        scale=alt.Scale(domain=["Profitable", "Loss-making"], range=["#2ee6a6", "#ff5c7a"]),
+                        legend=alt.Legend(orient="right", title=None),
+                    ),
+                    tooltip=[alt.Tooltip("Outcome:N"), alt.Tooltip("Count:Q")],
+                ).properties(height=220)
+                st.altair_chart(alt_dark(donut), use_container_width=True)
 
 
 # ── UI ──────────────────────────────────────────────────────────────────
