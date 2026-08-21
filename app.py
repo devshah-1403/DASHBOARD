@@ -193,6 +193,23 @@ def inject_theme():
             padding: 1px 7px; border-radius: 999px;
         }
 
+        /* Segment-scoped one-line summary (shown inside each open/closed
+           segment tab — reflects ONLY that segment, not the whole book). */
+        .seg-summary {
+            display: flex; flex-wrap: wrap; align-items: center; gap: 22px;
+            background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px;
+            padding: 10px 18px; margin-bottom: 16px;
+        }
+        .seg-stat { display: flex; align-items: center; gap: 8px; }
+        .seg-stat-label {
+            font-size: 0.68rem; font-weight: 600; text-transform: uppercase;
+            letter-spacing: 0.05em; color: var(--muted);
+        }
+        .seg-stat-value {
+            font-family: 'Calibri', 'Carlito', 'Segoe UI', sans-serif;
+            font-size: 0.88rem; font-weight: 700;
+        }
+
         /* Position cards */
         .pos-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 8px; }
         @media (max-width: 640px) { .pos-grid { grid-template-columns: 1fr; } }
@@ -333,6 +350,18 @@ def kpi_card(label, value, positive=None, sub=None):
             {sub_html}
         </div>
     """)
+
+
+def seg_summary_line(items):
+    """items: list of (label, value_html, extra_css_class) tuples — a single
+    horizontal strip of stats scoped to whichever segment tab it's rendered
+    inside, so it never mixes numbers across segments."""
+    stats = "".join(
+        f'<div class="seg-stat"><span class="seg-stat-label">{lbl}</span>'
+        f'<span class="seg-stat-value {cls}">{val}</span></div>'
+        for lbl, val, cls in items
+    )
+    return flat(f'<div class="seg-summary">{stats}</div>')
 
 
 # ── Password gate ─────────────────────────────────────────────────────────
@@ -521,6 +550,32 @@ def fmt_time(ts):
         return ts
 
 
+def fmt_datetime(ts):
+    """ts is an ISO datetime string (possibly tz-aware); show date + time."""
+    if not ts:
+        return "-"
+    try:
+        dt = datetime.fromisoformat(ts)
+        return dt.strftime("%d %b, %H:%M:%S")
+    except ValueError:
+        return ts
+
+
+def fmt_sell_date(d):
+    """d may be a date/datetime object or an ISO-ish string; show a short date."""
+    if not d:
+        return "-"
+    if isinstance(d, str):
+        try:
+            d = datetime.fromisoformat(d)
+        except ValueError:
+            return d
+    try:
+        return d.strftime("%d %b %Y")
+    except AttributeError:
+        return str(d)
+
+
 def alt_dark(chart):
     """Apply a shared dark, transparent-background theme to an Altair chart."""
     return (
@@ -611,6 +666,12 @@ def render_live(engine: "LiveEngine"):
 
     eq_buy, eq_mtm, eq_day = seg_totals(equity)
     fo_buy, fo_mtm, fo_day = seg_totals(fo)
+    other_buy, other_mtm, other_day = seg_totals(other)
+    seg_open_totals = {
+        "Equity": (eq_buy, eq_mtm, eq_day),
+        "F&O": (fo_buy, fo_mtm, fo_day),
+        "Other": (other_buy, other_mtm, other_day),
+    }
     investment_value = eq_buy + fo_buy
     current_mtm = eq_mtm + fo_mtm
     total_mtm = engine.booked_mtm_total + current_mtm
@@ -643,6 +704,30 @@ def render_live(engine: "LiveEngine"):
           with seg_tab:
             count_badge = f'<span class="badge">{len(rows)}</span>'
             st.markdown(f'<div class="section-label">{label} {count_badge}</div>', unsafe_allow_html=True)
+
+            # One-line summary scoped to THIS segment only — switching to the
+            # F&O tab shows F&O's own investment/running-P&L/today's-P&L,
+            # not the combined book total.
+            seg_buy, seg_mtm, seg_day = seg_open_totals.get(label, (0.0, 0.0, 0.0))
+            seg_mtm_pct = (seg_mtm / seg_buy * 100) if seg_buy else 0.0
+            seg_day_pct = (seg_day / seg_buy * 100) if seg_buy else 0.0
+            st.markdown(
+                seg_summary_line([
+                    (f"{label} Investment", fmt_money(seg_buy), ""),
+                    (
+                        "Running P&L",
+                        f"{fmt_money(seg_mtm)} ({'+' if seg_mtm >= 0 else ''}{seg_mtm_pct:.2f}%)",
+                        "kpi-pos" if seg_mtm >= 0 else "kpi-neg",
+                    ),
+                    (
+                        "Today's P&L",
+                        f"{fmt_money(seg_day)} ({'+' if seg_day >= 0 else ''}{seg_day_pct:.2f}%)",
+                        "kpi-pos" if seg_day >= 0 else "kpi-neg",
+                    ),
+                ]),
+                unsafe_allow_html=True,
+            )
+
             if not rows:
                 st.caption("No open positions in this segment.")
                 continue
@@ -676,7 +761,7 @@ def render_live(engine: "LiveEngine"):
                 # has a real gain (skip the glow if the top spot is a loss/None).
                 is_top = idx == 0 and day_pct is not None and day_pct > 0
                 card_cls = "pos-card top-gain" if is_top else "pos-card"
-                badge_html = '<span class="top-gain-badge">🔥 Top gain</span>' if is_top else ""
+                badge_html = f'<span class="top-gain-badge">🔥 {label} Top Gain</span>' if is_top else ""
                 mtm = r.get("mtm")
                 mtm_cls = "kpi-pos" if (mtm or 0) >= 0 else "kpi-neg"
                 cards.append(flat(f"""
@@ -703,7 +788,7 @@ def render_live(engine: "LiveEngine"):
                                 <div class="pos-mtm-label">MTM</div>
                                 <div class="pos-mtm-value {mtm_cls}">{fmt_money(mtm)}</div>
                             </div>
-                            <div class="pos-tick">🕐 {fmt_time(r.get('ts'))}</div>
+                            <div class="pos-tick">🕐 {fmt_datetime(r.get('ts'))}</div>
                         </div>
                     </div>
                 """))
@@ -724,11 +809,16 @@ def render_live(engine: "LiveEngine"):
                 unsafe_allow_html=True,
             )
 
-            def closed_card(c, is_top=False):
+            def _closed_sell_date(c):
+                dates = [t.get("SellDate") for t in c.get("Trades", []) if t.get("SellDate")]
+                return max(dates) if dates else None
+
+            def closed_card(c, is_top=False, segment_label=""):
                 pnl = c["BookedPnL"]
                 pnl_cls = "kpi-pos" if pnl >= 0 else "kpi-neg"
                 card_cls = "pos-card top-gain" if is_top else "pos-card"
-                badge_html = '<span class="top-gain-badge">🔥 Top gain</span>' if is_top else ""
+                badge_html = f'<span class="top-gain-badge">🔥 {segment_label} Top Gain</span>' if is_top else ""
+                sell_date = fmt_sell_date(_closed_sell_date(c))
                 return flat(f"""
                     <div class="{card_cls}">
                         {badge_html}
@@ -745,6 +835,7 @@ def render_live(engine: "LiveEngine"):
                             <div><div class="pos-row-label">Qty</div><div class="pos-row-value">{fmt_qty(c.get('Qty'))}</div></div>
                             <div><div class="pos-row-label">Avg Buy</div><div class="pos-row-value">{fmt_money(c.get('AvgBuyPrice'))}</div></div>
                             <div><div class="pos-row-label">Avg Sell</div><div class="pos-row-value">{fmt_money(c.get('AvgSellPrice'))}</div></div>
+                            <div><div class="pos-row-label">Sell Date</div><div class="pos-row-value">{sell_date}</div></div>
                         </div>
                         <div class="pos-mtm-block">
                             <div>
@@ -773,16 +864,36 @@ def render_live(engine: "LiveEngine"):
                     continue
                 seg_win_rate = sum(1 for c in rows if c["BookedPnL"] >= 0) / len(rows) * 100
                 st.markdown(
-                    f'<div class="section-label">{label} <span class="badge">{len(rows)}</span> '
-                    f'<span class="badge">Win rate {seg_win_rate:.0f}%</span></div>',
+                    f'<div class="section-label">{label} <span class="badge">{len(rows)}</span></div>',
+                    unsafe_allow_html=True,
+                )
+                # One-line summary scoped to THIS segment's closed positions
+                # only — cost basis deployed here vs. what was booked here.
+                seg_invested = sum(abs(c.get("Qty") or 0) * (c.get("AvgBuyPrice") or 0) for c in rows)
+                seg_booked = sum(c["BookedPnL"] for c in rows)
+                seg_booked_pct = (seg_booked / seg_invested * 100) if seg_invested else 0.0
+                st.markdown(
+                    seg_summary_line([
+                        (f"{label} Investment", fmt_money(seg_invested), ""),
+                        (
+                            "Booked P&L",
+                            f"{fmt_money(seg_booked)} ({'+' if seg_booked >= 0 else ''}{seg_booked_pct:.2f}%)",
+                            "kpi-pos" if seg_booked >= 0 else "kpi-neg",
+                        ),
+                        ("Win rate", f"{seg_win_rate:.0f}%", ""),
+                    ]),
                     unsafe_allow_html=True,
                 )
                 # Whichever card has the single highest booked P&L (and it's
                 # actually a gain) gets the glow, regardless of grid position.
-                sorted_rows = sorted(rows, key=lambda x: x["BookedPnL"])
+                sorted_rows = sorted(rows, key=lambda x: x["BookedPnL"], reverse=True)
                 best_pnl = max((c["BookedPnL"] for c in rows), default=None)
                 seg_cards = [
-                    closed_card(c, is_top=(best_pnl is not None and best_pnl > 0 and c["BookedPnL"] == best_pnl))
+                    closed_card(
+                        c,
+                        is_top=(best_pnl is not None and best_pnl > 0 and c["BookedPnL"] == best_pnl),
+                        segment_label=label,
+                    )
                     for c in sorted_rows
                 ]
                 st.markdown(f'<div class="pos-grid">{"".join(seg_cards)}</div>', unsafe_allow_html=True)
