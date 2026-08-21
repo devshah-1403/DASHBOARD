@@ -636,7 +636,11 @@ def render_live(engine: "LiveEngine"):
         open_segments = [("Equity", equity), ("F&O", fo)]
         if other:
             open_segments.append(("Other", other))
-        for label, rows in open_segments:
+        # One sub-tab per segment so picking "F&O" shows only F&O, not every
+        # segment stacked one after another.
+        open_seg_tabs = st.tabs([f"{label} ({len(rows)})" for label, rows in open_segments])
+        for (label, rows), seg_tab in zip(open_segments, open_seg_tabs):
+          with seg_tab:
             count_badge = f'<span class="badge">{len(rows)}</span>'
             st.markdown(f'<div class="section-label">{label} {count_badge}</div>', unsafe_allow_html=True)
             if not rows:
@@ -720,20 +724,34 @@ def render_live(engine: "LiveEngine"):
                 unsafe_allow_html=True,
             )
 
-            def closed_card(c):
+            def closed_card(c, is_top=False):
                 pnl = c["BookedPnL"]
                 pnl_cls = "kpi-pos" if pnl >= 0 else "kpi-neg"
+                card_cls = "pos-card top-gain" if is_top else "pos-card"
+                badge_html = '<span class="top-gain-badge">🔥 Top gain</span>' if is_top else ""
                 return flat(f"""
-                    <div class="closed-card">
-                        <div class="closed-top">
-                            <div class="closed-symbol">{c.get('Symbol', '-')}</div>
-                            <span class="closed-badge">{c.get('Segment', '-')}</span>
+                    <div class="{card_cls}">
+                        {badge_html}
+                        <div class="pos-top">
+                            <div>
+                                <div class="pos-symbol">{c.get('Symbol', '-')}</div>
+                                <div class="pos-tags">
+                                    <span class="pos-chip">{c.get('Exchange', '-')}</span>
+                                    <span class="pos-chip">{c.get('Segment', '-')}</span>
+                                </div>
+                            </div>
                         </div>
-                        <div class="closed-rows"><span>Exchange</span><span>{c.get('Exchange', '-')}</span></div>
-                        <div class="closed-rows"><span>Qty</span><span>{fmt_qty(c.get('Qty'))}</span></div>
-                        <div class="closed-rows"><span>Avg Buy</span><span>{fmt_money(c.get('AvgBuyPrice'))}</span></div>
-                        <div class="closed-rows"><span>Avg Sell</span><span>{fmt_money(c.get('AvgSellPrice'))}</span></div>
-                        <div class="closed-pnl {pnl_cls}">{fmt_money(pnl)}</div>
+                        <div class="pos-rows">
+                            <div><div class="pos-row-label">Qty</div><div class="pos-row-value">{fmt_qty(c.get('Qty'))}</div></div>
+                            <div><div class="pos-row-label">Avg Buy</div><div class="pos-row-value">{fmt_money(c.get('AvgBuyPrice'))}</div></div>
+                            <div><div class="pos-row-label">Avg Sell</div><div class="pos-row-value">{fmt_money(c.get('AvgSellPrice'))}</div></div>
+                        </div>
+                        <div class="pos-mtm-block">
+                            <div>
+                                <div class="pos-mtm-label">Booked P&amp;L</div>
+                                <div class="pos-mtm-value {pnl_cls}">{fmt_money(pnl)}</div>
+                            </div>
+                        </div>
                     </div>
                 """)
 
@@ -744,7 +762,11 @@ def render_live(engine: "LiveEngine"):
             if closed_other:
                 closed_segments.append(("Other", closed_other))
 
-            for label, rows in closed_segments:
+            # One sub-tab per segment so picking "F&O" shows only F&O, not every
+            # segment stacked one after another.
+            closed_seg_tabs = st.tabs([f"{label} ({len(rows)})" for label, rows in closed_segments])
+            for (label, rows), seg_tab in zip(closed_segments, closed_seg_tabs):
+              with seg_tab:
                 if not rows:
                     st.markdown(f'<div class="section-label">{label} <span class="badge">0</span></div>', unsafe_allow_html=True)
                     st.caption(f"No closed {label.lower()} positions in this ledger.")
@@ -755,8 +777,15 @@ def render_live(engine: "LiveEngine"):
                     f'<span class="badge">Win rate {seg_win_rate:.0f}%</span></div>',
                     unsafe_allow_html=True,
                 )
-                seg_cards = [closed_card(c) for c in sorted(rows, key=lambda x: x["BookedPnL"])]
-                st.markdown(f'<div class="closed-grid">{"".join(seg_cards)}</div>', unsafe_allow_html=True)
+                # Whichever card has the single highest booked P&L (and it's
+                # actually a gain) gets the glow, regardless of grid position.
+                sorted_rows = sorted(rows, key=lambda x: x["BookedPnL"])
+                best_pnl = max((c["BookedPnL"] for c in rows), default=None)
+                seg_cards = [
+                    closed_card(c, is_top=(best_pnl is not None and best_pnl > 0 and c["BookedPnL"] == best_pnl))
+                    for c in sorted_rows
+                ]
+                st.markdown(f'<div class="pos-grid">{"".join(seg_cards)}</div>', unsafe_allow_html=True)
 
             # ── Charts (combined across segments) — rendered below every
             # position card section so cards stay the primary focus. Chart 1
