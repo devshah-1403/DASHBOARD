@@ -17,9 +17,13 @@ Secrets required (set in Streamlit Cloud's "Secrets" panel, never in code):
     ANGEL_PASSWORD
     ANGEL_TOTP_SECRET
 
-The trade ledger Excel is uploaded through the sidebar each session (or
-bundled in the repo as securities_today.xlsx as a fallback default) rather
-than read from a local path, since Streamlit Cloud has no access to your PC.
+The trade ledger is fetched live as JSON from a Google Apps Script Web App
+bound to the Sheet (see Code.gs — deploy it, paste the /exec URL into the
+sidebar, or default it via st.secrets["APPS_SCRIPT_URL"]) rather than an
+uploaded/local Excel file or a CSV export link. This means: no "Anyone with
+the link" sharing requirement (the script runs under your own account), no
+CSV parsing/format guessing, and today's ledger updates without a redeploy
+— just edit the sheet and hit "Restart feed / refetch sheet".
 
 LIVE UPDATES
     Instead of refreshing the whole page every few seconds (old
@@ -31,7 +35,6 @@ LIVE UPDATES
     real time, tick by tick, without touching the rest of the app.
     Requires streamlit >= 1.33.
 """
-import io
 import os
 import re
 import threading
@@ -42,14 +45,29 @@ from zoneinfo import ZoneInfo
 import altair as alt
 import pandas as pd
 import pyotp
+import requests
 import streamlit as st
 from SmartApi import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
-from positions_builder import load_trade_ledger, build_positions
+from positions_builder import load_trade_ledger, load_trade_ledger_from_records, build_positions
 from token_resolver import resolve_all
 
 IST = ZoneInfo("Asia/Kolkata")
+
+
+def _fetch_ledger_records(apps_script_url: str, sheet_name: str | None = None):
+    """Hits the Apps Script Web App's /exec URL and returns its JSON body
+    (a list of row-dicts) directly — no CSV parsing involved. See Code.gs
+    for the doGet handler this talks to.
+    """
+    params = {"sheet": sheet_name} if sheet_name else None
+    resp = requests.get(apps_script_url, params=params, timeout=20)
+    resp.raise_for_status()
+    data = resp.json()
+    if isinstance(data, dict) and "error" in data:
+        raise ValueError(f"Apps Script error: {data['error']}")
+    return data
 
 st.set_page_config(
     page_title="Booked Profit Dashboard",
@@ -679,9 +697,10 @@ class LiveEngine:
             return list(self.latest_prices.values()), self.last_tick_ts
 
 
-@st.cache_resource(show_spinner="Reading ledger...")
-def get_engine(ledger_bytes: bytes):
-    rows = load_trade_ledger(io.BytesIO(ledger_bytes))
+@st.cache_resource(show_spinner="Fetching ledger from Google Sheet (Apps Script)...")
+def get_engine(apps_script_url: str, sheet_name: str | None):
+    records = _fetch_ledger_records(apps_script_url, sheet_name)
+    rows = load_trade_ledger_from_records(records)
     return LiveEngine(rows)
 
 
@@ -736,15 +755,22 @@ def fmt_sell_date(d):
 
 
 def fmt_expiry(e):
-    """e may be a date/datetime object or a string like '25AUG2026'/'2026-08-25'."""
+    """e may be a date/datetime object or a string like '25AUG2026'/'2026-08-25'/
+    '2026-08-25 00:00:00' (the last of these is what positions_builder's
+    _norm() produces for CSV-sourced — i.e. Google Sheets — ledger rows,
+    since it str()s a full Timestamp rather than a bare date)."""
     if not e:
         return "-"
     if isinstance(e, str):
-        for pattern in ("%d%b%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
+        for pattern in ("%d%b%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S"):
             try:
                 return datetime.strptime(e, pattern).strftime("%d %b %Y")
             except ValueError:
                 continue
+        # Last resort: let pandas' looser parser have a go before giving up.
+        parsed = pd.to_datetime(e, errors="coerce")
+        if pd.notna(parsed):
+            return parsed.strftime("%d %b %Y")
         return e  # unrecognized format — show as-is rather than hide it
     try:
         return e.strftime("%d %b %Y")
@@ -1243,26 +1269,30 @@ def main():
 
     with st.sidebar:
         st.markdown("### Trade ledger")
-        uploaded = st.file_uploader("Upload today's securities Excel", type=["xlsx"])
-        default_path = "securities_today.xlsx"
-        ledger_bytes = None
-        if uploaded is not None:
-            ledger_bytes = uploaded.getvalue()
-        elif os.path.exists(default_path):
-            with open(default_path, "rb") as f:
-                ledger_bytes = f.read()
-            st.caption("Using bundled `securities_today.xlsx` (no file uploaded this session).")
+        default_url = st.secrets.get("APPS_SCRIPT_URL", "")
+        script_url = st.text_input(
+            "Apps Script Web App URL",
+            value=default_url,
+            placeholder="https://script.google.com/macros/s/AKfycb.../exec",
+            help="Deploy Code.gs in your Sheet as a Web App (Execute as: Me, "
+                 "Access: Anyone with the link) and paste the /exec URL here.",
+        )
+        sheet_tab = st.text_input(
+            "Tab name (optional)",
+            value=st.secrets.get("APPS_SCRIPT_SHEET_NAME", ""),
+            placeholder="leave blank to use the first tab",
+        )
         st.divider()
-        if st.button("🔄 Restart feed", use_container_width=True):
+        if st.button("🔄 Restart feed / refetch sheet", use_container_width=True):
             st.cache_resource.clear()
             st.rerun()
         st.caption(f"Live tables refresh every {TICK_REFRESH_SECONDS}s, tick by tick.")
 
-    if ledger_bytes is None:
-        st.info("Upload your trade ledger Excel in the sidebar to start the live feed.")
+    if not script_url:
+        st.info("Paste your Apps Script Web App URL in the sidebar to start the live feed.")
         return
 
-    engine = get_engine(ledger_bytes)
+    engine = get_engine(script_url, sheet_tab or None)
     render_live(engine)
 
 
