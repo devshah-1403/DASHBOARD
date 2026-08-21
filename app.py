@@ -239,7 +239,12 @@ class LiveEngine:
         self.status = "starting"
         self.error = None
         self.last_tick_ts = None      # datetime of most recently received tick
-        self._start(ledger_rows)
+        # Positions/token-resolution/login are all network calls and can take
+        # several seconds. Do them in a background thread so get_engine()
+        # (and therefore the page) returns to the browser immediately instead
+        # of blocking behind Streamlit's "connecting" spinner. The UI polls
+        # self.status via the live fragment until this flips to "live".
+        threading.Thread(target=self._start, args=(ledger_rows,), daemon=True).start()
 
     def _start(self, ledger_rows):
         try:
@@ -351,7 +356,7 @@ class LiveEngine:
             return list(self.latest_prices.values()), self.last_tick_ts
 
 
-@st.cache_resource(show_spinner="Logging into Angel One and starting the live feed...")
+@st.cache_resource(show_spinner="Reading ledger...")
 def get_engine(ledger_bytes: bytes):
     rows = load_trade_ledger(io.BytesIO(ledger_bytes))
     return LiveEngine(rows)
@@ -392,6 +397,7 @@ def render_live(engine: "LiveEngine"):
         return
     elif engine.status == "starting":
         st.markdown(status_pill("warn", "Starting up..."), unsafe_allow_html=True)
+        st.caption("Resolving instrument tokens and logging into Angel One — this can take a few seconds on a cold start.")
         return
 
     ticks, last_tick_ts = engine.snapshot()
