@@ -36,7 +36,9 @@ import os
 import threading
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
+import altair as alt
 import pandas as pd
 import pyotp
 import streamlit as st
@@ -45,6 +47,8 @@ from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
 from positions_builder import load_trade_ledger, build_positions
 from token_resolver import resolve_all
+
+IST = ZoneInfo("Asia/Kolkata")
 
 st.set_page_config(
     page_title="Booked Profit Dashboard",
@@ -131,7 +135,7 @@ def inject_theme():
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
 
         /* KPI cards */
-        .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 26px; }
+        .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 26px; }
         .kpi-card {
             background: linear-gradient(180deg, var(--panel-2), var(--panel));
             border: 1px solid var(--border); border-radius: 16px; padding: 18px 20px;
@@ -166,17 +170,84 @@ def inject_theme():
             color: var(--accent) !important; border-bottom: 2px solid var(--accent) !important;
         }
 
-        /* Dataframe polish */
+        /* Top status + live clock bar */
+        .top-bar {
+            display: flex; align-items: center; justify-content: space-between;
+            background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px;
+            padding: 10px 18px; margin-bottom: 20px;
+        }
+        .top-clock {
+            font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; color: var(--text);
+            display: flex; align-items: center; gap: 10px;
+        }
+        .top-clock .date-part { color: var(--muted); }
+        .top-clock .tz-badge {
+            font-size: 0.65rem; font-weight: 700; color: var(--accent);
+            background: rgba(52,213,200,0.1); border: 1px solid rgba(52,213,200,0.25);
+            padding: 1px 7px; border-radius: 999px;
+        }
+
+        /* Position cards */
+        .pos-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; margin-bottom: 8px; }
+        .pos-card {
+            background: linear-gradient(180deg, var(--panel-2), var(--panel));
+            border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px;
+            transition: border-color 0.2s ease;
+        }
+        .pos-card:hover { border-color: rgba(52,213,200,0.35); }
+        .pos-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
+        .pos-symbol { font-weight: 700; font-size: 0.98rem; letter-spacing: -0.01em; }
+        .pos-tags { display: flex; gap: 5px; margin-top: 4px; }
+        .pos-chip {
+            font-size: 0.62rem; font-weight: 700; padding: 1px 7px; border-radius: 999px;
+            background: var(--panel); border: 1px solid var(--border); color: var(--muted);
+            text-transform: uppercase; letter-spacing: 0.03em;
+        }
+        .pos-chip.long { color: var(--pos); border-color: rgba(46,230,166,0.3); }
+        .pos-chip.short { color: var(--neg); border-color: rgba(255,92,122,0.3); }
+        .pos-daychg {
+            font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; font-weight: 700;
+            padding: 3px 9px; border-radius: 999px; white-space: nowrap;
+        }
+        .day-pos { background: rgba(46,230,166,0.12); color: var(--pos); }
+        .day-neg { background: rgba(255,92,122,0.12); color: var(--neg); }
+        .pos-rows { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; margin-bottom: 10px; }
+        .pos-row-label { font-size: 0.68rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+        .pos-row-value { font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; font-weight: 600; }
+        .pos-mtm-block {
+            display: flex; justify-content: space-between; align-items: center;
+            border-top: 1px solid var(--border); padding-top: 10px;
+        }
+        .pos-mtm-label { font-size: 0.68rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+        .pos-mtm-value { font-family: 'JetBrains Mono', monospace; font-size: 1.02rem; font-weight: 700; }
+        .pos-tick { font-size: 0.66rem; color: var(--muted); font-family: 'JetBrains Mono', monospace; }
+
+        /* Closed position cards */
+        .closed-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; margin-bottom: 20px; }
+        .closed-card {
+            background: linear-gradient(180deg, var(--panel-2), var(--panel));
+            border: 1px solid var(--border); border-radius: 14px; padding: 13px 15px;
+        }
+        .closed-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
+        .closed-symbol { font-weight: 700; font-size: 0.92rem; }
+        .closed-badge {
+            font-size: 0.62rem; font-weight: 700; padding: 1px 7px; border-radius: 999px;
+            background: var(--panel); border: 1px solid var(--border); color: var(--muted);
+        }
+        .closed-rows { display: flex; justify-content: space-between; font-size: 0.72rem; color: var(--muted); margin-bottom: 4px; font-family: 'JetBrains Mono', monospace; }
+        .closed-pnl { font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 0.95rem; margin-top: 8px; }
+
+        .chart-card {
+            background: var(--panel-2); border: 1px solid var(--border); border-radius: 14px;
+            padding: 16px 18px 6px 18px; margin-bottom: 18px;
+        }
+
+        /* Dataframe polish (still used where a raw table makes sense) */
         div[data-testid="stDataFrame"] {
             border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
         }
 
         div[data-testid="stMetric"] { display: none; }  /* using custom KPI cards instead */
-
-        .ticker-strip {
-            font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: var(--muted);
-            margin-bottom: 4px;
-        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -321,7 +392,7 @@ class LiveEngine:
                 ltp = message.get("last_traded_price", 0) / 100.0
                 qty = meta.get("qty")
                 avg_price = meta.get("avgPrice")
-                now = datetime.now()
+                now = datetime.now(IST)
                 tick = {
                     "token": token, "symbol": meta.get("symbol", token),
                     "exchange": meta.get("exchange", ""), "segment": meta.get("segment", "Other"),
@@ -369,6 +440,36 @@ def fmt_money(x):
     return f"(₹{abs(x):,.2f})" if x < 0 else f"₹{x:,.2f}"
 
 
+def fmt_qty(qty):
+    if qty is None:
+        return "-"
+    return f"{abs(round(qty)):,}"
+
+
+def fmt_time(ts):
+    """ts is an ISO datetime string (possibly tz-aware); show HH:MM:SS only."""
+    if not ts:
+        return "-"
+    try:
+        dt = datetime.fromisoformat(ts)
+        return dt.strftime("%H:%M:%S")
+    except ValueError:
+        return ts
+
+
+def alt_dark(chart):
+    """Apply a shared dark, transparent-background theme to an Altair chart."""
+    return (
+        chart.configure_view(strokeWidth=0)
+        .configure_axis(
+            gridColor="#1e2733", domainColor="#1e2733", tickColor="#1e2733",
+            labelColor="#7f8ba3", titleColor="#7f8ba3", labelFontSize=10.5, titleFontSize=11,
+        )
+        .configure_legend(labelColor="#7f8ba3", titleColor="#7f8ba3")
+        .properties(background="transparent")
+    )
+
+
 def style_pnl_table(df, cols):
     """Return a pandas Styler that colors P&L-type columns green/red."""
     def _color(v):
@@ -402,32 +503,62 @@ def render_live(engine: "LiveEngine"):
 
     ticks, last_tick_ts = engine.snapshot()
 
+    now_ist = datetime.now(IST)
     if engine.status == "disconnected":
-        st.markdown(status_pill("error", "Disconnected — restart feed in sidebar"), unsafe_allow_html=True)
+        status_html = status_pill("error", "Disconnected — restart feed in sidebar")
     else:
-        age = f"{(datetime.now() - last_tick_ts).seconds}s ago" if last_tick_ts else "waiting for first tick..."
-        st.markdown(status_pill("live", f"Live • last tick {age}"), unsafe_allow_html=True)
+        age = f"{(now_ist - last_tick_ts).seconds}s ago" if last_tick_ts else "waiting for first tick..."
+        status_html = status_pill("live", f"Live • last tick {age}")
+
+    st.markdown(
+        f"""
+        <div class="top-bar">
+            {status_html}
+            <div class="top-clock">
+                <span class="date-part">{now_ist.strftime("%A, %d %b %Y")}</span>
+                <span>{now_ist.strftime("%H:%M:%S")}</span>
+                <span class="tz-badge">IST</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     equity = [t for t in ticks if t.get("segment") == "Equity"]
     fo = [t for t in ticks if t.get("segment") == "F&O"]
 
     def seg_totals(rows):
-        buy_value = sum((r["qty"] or 0) * (r["avgPrice"] or 0) for r in rows)
+        # Capital deployed must use abs(qty): a short position has a
+        # negative qty, and summing signed qty*avgPrice was silently
+        # *subtracting* short positions' cost basis from the total instead
+        # of adding it — that was the "wrong Investment Value" bug.
+        buy_value = sum(abs(r["qty"] or 0) * (r["avgPrice"] or 0) for r in rows)
         mtm = sum(r["mtm"] for r in rows if r["mtm"] is not None)
-        return buy_value, mtm
+        # Today's move only (ltp vs previous close), signed qty on purpose:
+        # for a short, a falling price is a gain, and (ltp-close) is
+        # negative while qty is negative too, so the product comes out
+        # positive automatically.
+        day_pnl = sum(
+            (r["ltp"] - r["close"]) * r["qty"]
+            for r in rows if r.get("close") not in (None, 0) and r.get("qty") is not None
+        )
+        return buy_value, mtm, day_pnl
 
-    eq_buy, eq_mtm = seg_totals(equity)
-    fo_buy, fo_mtm = seg_totals(fo)
+    eq_buy, eq_mtm, eq_day = seg_totals(equity)
+    fo_buy, fo_mtm, fo_day = seg_totals(fo)
     investment_value = eq_buy + fo_buy
     current_mtm = eq_mtm + fo_mtm
     total_mtm = engine.booked_mtm_total + current_mtm
+    day_pnl_total = eq_day + fo_day
+    day_pnl_pct = (day_pnl_total / investment_value * 100) if investment_value else 0.0
 
     st.markdown(
         f"""
         <div class="kpi-grid">
-            {kpi_card("Investment Value", fmt_money(investment_value), sub=f"{len(ticks)} instruments tracked")}
+            {kpi_card("Investment Value", fmt_money(investment_value), sub=f"{len(ticks)} instruments · cost basis")}
+            {kpi_card("Today's P&amp;L", fmt_money(day_pnl_total), positive=day_pnl_total >= 0, sub=f"{'+' if day_pnl_pct >= 0 else ''}{day_pnl_pct:.2f}% vs prev close")}
+            {kpi_card("Open MTM", fmt_money(current_mtm), positive=current_mtm >= 0, sub=f"Eq {fmt_money(eq_mtm)} · F&amp;O {fmt_money(fo_mtm)}")}
             {kpi_card("Booked MTM", fmt_money(engine.booked_mtm_total), positive=engine.booked_mtm_total >= 0, sub=f"{len(engine.closed_positions)} closed positions")}
-            {kpi_card("Current (Open) MTM", fmt_money(current_mtm), positive=current_mtm >= 0, sub=f"Eq {fmt_money(eq_mtm)} · F&O {fmt_money(fo_mtm)}")}
             {kpi_card("Total MTM", fmt_money(total_mtm), positive=total_mtm >= 0, sub="Booked + Open, live")}
         </div>
         """,
@@ -443,52 +574,149 @@ def render_live(engine: "LiveEngine"):
             if not rows:
                 st.caption("No open positions in this segment.")
                 continue
-            df = pd.DataFrame(rows)[["symbol", "exchange", "qty", "avgPrice", "ltp", "close", "mtm", "ts"]]
-            df.columns = ["Symbol", "Exchange", "Qty", "Avg Price", "CMP", "Prev Close", "MTM", "Last Tick"]
-            st.dataframe(
-                style_pnl_table(df, ["MTM"]),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Avg Price": st.column_config.NumberColumn(format="₹%.2f"),
-                    "CMP": st.column_config.NumberColumn(format="₹%.2f"),
-                    "Prev Close": st.column_config.NumberColumn(format="₹%.2f"),
-                },
-            )
+
+            cards = []
+            for r in sorted(rows, key=lambda x: (x.get("mtm") or 0)):
+                pos_type = (r.get("positionType") or "LONG").upper()
+                type_cls = "long" if pos_type == "LONG" else "short"
+                close = r.get("close")
+                day_pct = ((r["ltp"] - close) / close * 100) if close else None
+                day_cls = "day-pos" if (day_pct or 0) >= 0 else "day-neg"
+                day_txt = f"{'▲' if (day_pct or 0) >= 0 else '▼'} {abs(day_pct):.2f}%" if day_pct is not None else "–"
+                mtm = r.get("mtm")
+                mtm_cls = "kpi-pos" if (mtm or 0) >= 0 else "kpi-neg"
+                cards.append(f"""
+                    <div class="pos-card">
+                        <div class="pos-top">
+                            <div>
+                                <div class="pos-symbol">{r.get('symbol', '-')}</div>
+                                <div class="pos-tags">
+                                    <span class="pos-chip">{r.get('exchange', '-')}</span>
+                                    <span class="pos-chip {type_cls}">{pos_type}</span>
+                                </div>
+                            </div>
+                            <span class="pos-daychg {day_cls}">{day_txt}</span>
+                        </div>
+                        <div class="pos-rows">
+                            <div><div class="pos-row-label">Qty</div><div class="pos-row-value">{fmt_qty(r.get('qty'))}</div></div>
+                            <div><div class="pos-row-label">Avg Price</div><div class="pos-row-value">{fmt_money(r.get('avgPrice'))}</div></div>
+                            <div><div class="pos-row-label">CMP</div><div class="pos-row-value">{fmt_money(r.get('ltp'))}</div></div>
+                            <div><div class="pos-row-label">Prev Close</div><div class="pos-row-value">{fmt_money(close)}</div></div>
+                        </div>
+                        <div class="pos-mtm-block">
+                            <div>
+                                <div class="pos-mtm-label">MTM</div>
+                                <div class="pos-mtm-value {mtm_cls}">{fmt_money(mtm)}</div>
+                            </div>
+                            <div class="pos-tick">🕐 {fmt_time(r.get('ts'))}</div>
+                        </div>
+                    </div>
+                """)
+            st.markdown(f'<div class="pos-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
 
     with tab_closed:
         if not engine.closed_positions:
             st.caption("No closed positions in this ledger.")
         else:
-            df = pd.DataFrame(engine.closed_positions)[
-                ["Symbol", "Exchange", "Segment", "Qty", "AvgBuyPrice", "AvgSellPrice", "BookedPnL"]
-            ]
-            st.markdown(f'<div class="section-label">All closed positions <span class="badge">{len(df)}</span></div>', unsafe_allow_html=True)
-            st.dataframe(
-                style_pnl_table(df, ["BookedPnL"]),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "AvgBuyPrice": st.column_config.NumberColumn(format="₹%.2f"),
-                    "AvgSellPrice": st.column_config.NumberColumn(format="₹%.2f"),
-                },
+            closed = engine.closed_positions
+            wins = sum(1 for c in closed if c["BookedPnL"] >= 0)
+            losses = len(closed) - wins
+            win_rate = wins / len(closed) * 100 if closed else 0
+
+            st.markdown(
+                f'<div class="section-label">All closed positions <span class="badge">{len(closed)}</span> '
+                f'<span class="badge">Win rate {win_rate:.0f}%</span></div>',
+                unsafe_allow_html=True,
             )
 
-            # Cumulative booked profit chart — Equity only, since F&O sell
-            # dates aren't reliably present in this ledger (see project notes).
+            cards = []
+            for c in sorted(closed, key=lambda x: x["BookedPnL"]):
+                pnl = c["BookedPnL"]
+                pnl_cls = "kpi-pos" if pnl >= 0 else "kpi-neg"
+                cards.append(f"""
+                    <div class="closed-card">
+                        <div class="closed-top">
+                            <div class="closed-symbol">{c.get('Symbol', '-')}</div>
+                            <span class="closed-badge">{c.get('Segment', '-')}</span>
+                        </div>
+                        <div class="closed-rows"><span>Exchange</span><span>{c.get('Exchange', '-')}</span></div>
+                        <div class="closed-rows"><span>Qty</span><span>{fmt_qty(c.get('Qty'))}</span></div>
+                        <div class="closed-rows"><span>Avg Buy</span><span>{fmt_money(c.get('AvgBuyPrice'))}</span></div>
+                        <div class="closed-rows"><span>Avg Sell</span><span>{fmt_money(c.get('AvgSellPrice'))}</span></div>
+                        <div class="closed-pnl {pnl_cls}">{fmt_money(pnl)}</div>
+                    </div>
+                """)
+            st.markdown(f'<div class="closed-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
+
+            # ── Chart 1: cumulative booked profit over time (all segments
+            # with a usable sell date; F&O sell dates aren't always present
+            # in this ledger format, so that segment may be partial).
             legs = []
-            for p in engine.closed_positions:
-                if p.get("Segment") != "Equity":
-                    continue
+            for p in closed:
                 for t in p.get("Trades", []):
                     if t.get("SellDate"):
-                        legs.append({"SellDate": t["SellDate"], "Pnl": t["Pnl"]})
+                        legs.append({"SellDate": t["SellDate"], "Pnl": t["Pnl"], "Segment": p.get("Segment", "Other")})
+
             if legs:
                 chart_df = pd.DataFrame(legs).sort_values("SellDate")
                 chart_df["Cumulative"] = chart_df["Pnl"].cumsum()
-                chart_df = chart_df.set_index("SellDate")
-                st.markdown('<div class="section-label">Cumulative booked profit — Equity</div>', unsafe_allow_html=True)
-                st.line_chart(chart_df["Cumulative"], color="#34d5c8")
+                st.markdown('<div class="chart-card">', unsafe_allow_html=True)
+                st.markdown('<div class="section-label">Cumulative booked profit over time</div>', unsafe_allow_html=True)
+                area = alt.Chart(chart_df).mark_area(
+                    line={"color": "#34d5c8", "strokeWidth": 2},
+                    interpolate="monotone",
+                    fillOpacity=0.15,
+                    color=alt.Gradient(
+                        gradient="linear",
+                        stops=[alt.GradientStop(color="#34d5c8", offset=0), alt.GradientStop(color="transparent", offset=1)],
+                        x1=1, x2=1, y1=1, y2=0,
+                    ),
+                ).encode(
+                    x=alt.X("SellDate:T", title=None),
+                    y=alt.Y("Cumulative:Q", title="Cumulative ₹"),
+                    tooltip=[alt.Tooltip("SellDate:T", title="Date"), alt.Tooltip("Cumulative:Q", title="Cumulative", format=",.0f")],
+                ).properties(height=240)
+                st.altair_chart(alt_dark(area), use_container_width=True)
+                st.markdown('</div>', unsafe_allow_html=True)
+            else:
+                st.caption("No sell-dated trade legs available yet to plot a cumulative profit trend.")
+
+            # ── Chart 2: top gainers/losers by booked P&L ──────────────────
+            top_df = pd.DataFrame(closed)[["Symbol", "BookedPnL"]].copy()
+            top_df["AbsPnl"] = top_df["BookedPnL"].abs()
+            top_df = top_df.sort_values("AbsPnl", ascending=False).head(12).drop(columns="AbsPnl")
+            top_df["Direction"] = top_df["BookedPnL"].apply(lambda v: "Profit" if v >= 0 else "Loss")
+
+            st.markdown('<div class="chart-card">', unsafe_allow_html=True)
+            st.markdown('<div class="section-label">Biggest movers — booked P&amp;L</div>', unsafe_allow_html=True)
+            bar = alt.Chart(top_df).mark_bar(cornerRadiusEnd=4).encode(
+                x=alt.X("BookedPnL:Q", title="Booked P&L (₹)"),
+                y=alt.Y("Symbol:N", sort="-x", title=None),
+                color=alt.Color(
+                    "Direction:N",
+                    scale=alt.Scale(domain=["Profit", "Loss"], range=["#2ee6a6", "#ff5c7a"]),
+                    legend=None,
+                ),
+                tooltip=[alt.Tooltip("Symbol:N"), alt.Tooltip("BookedPnL:Q", title="Booked P&L", format=",.0f")],
+            ).properties(height=max(220, 24 * len(top_df)))
+            st.altair_chart(alt_dark(bar), use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            # ── Chart 3: win rate donut ─────────────────────────────────────
+            win_df = pd.DataFrame({"Outcome": ["Profitable", "Loss-making"], "Count": [wins, losses]})
+            st.markdown('<div class="chart-card">', unsafe_allow_html=True)
+            st.markdown('<div class="section-label">Win / loss split</div>', unsafe_allow_html=True)
+            donut = alt.Chart(win_df).mark_arc(innerRadius=65, cornerRadius=3).encode(
+                theta=alt.Theta("Count:Q"),
+                color=alt.Color(
+                    "Outcome:N",
+                    scale=alt.Scale(domain=["Profitable", "Loss-making"], range=["#2ee6a6", "#ff5c7a"]),
+                    legend=alt.Legend(orient="right", title=None),
+                ),
+                tooltip=[alt.Tooltip("Outcome:N"), alt.Tooltip("Count:Q")],
+            ).properties(height=220)
+            st.altair_chart(alt_dark(donut), use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ── UI ──────────────────────────────────────────────────────────────────
