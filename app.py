@@ -424,20 +424,36 @@ def inject_theme():
         .hero-pill.positive { color: var(--pos); border-color: rgba(46,230,166,0.4); background: rgba(46,230,166,0.08); }
         .hero-pill.negative { color: var(--neg); border-color: rgba(255,92,122,0.4); background: rgba(255,92,122,0.08); }
 
-        /* Plain bordered stat tiles under a hero block. */
-        .hero-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 26px; }
-        .hero-tile { background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 13px 16px; }
+        /* Plain bordered stat tiles under a hero block. Always ONE row:
+           auto-fit + minmax used to wrap a card to a second row once the
+           strip ran out of horizontal space (e.g. 7 tiles at 170px min each
+           needs ~1260px). grid-auto-flow: column instead lays every tile
+           into the same row and, if the strip is still too narrow (small
+           screens), lets it scroll horizontally rather than wrap. */
+        .hero-tiles {
+            display: grid; grid-auto-flow: column; grid-auto-columns: minmax(150px, 1fr);
+            gap: 12px; margin-bottom: 26px; overflow-x: auto; padding-bottom: 2px;
+        }
+        .hero-tile {
+            background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px;
+            padding: 13px 16px; min-width: 150px;
+        }
         .hero-tile-label {
             font-size: 0.66rem; font-weight: 700; text-transform: uppercase;
             letter-spacing: 0.05em; color: var(--muted); margin-bottom: 6px;
+            white-space: nowrap;
         }
         .hero-tile-value {
             font-family: 'Calibri', 'Carlito', 'Segoe UI', sans-serif;
-            font-size: 1.05rem; font-weight: 700;
+            font-size: 1.05rem; font-weight: 700; white-space: nowrap;
         }
         .hero-tile-value.positive { color: var(--pos); }
         .hero-tile-value.negative { color: var(--neg); }
         </style>
+        <style>
+        /* Thin, unobtrusive scrollbar for .hero-tiles when it does need to scroll. */
+        .hero-tiles::-webkit-scrollbar { height: 4px; }
+        .hero-tiles::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
         """,
         unsafe_allow_html=True,
     )
