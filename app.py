@@ -146,8 +146,8 @@ def inject_theme():
             content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px;
             background: linear-gradient(90deg, var(--accent), var(--accent-2)); opacity: 0.85;
         }
-        .kpi-label { font-size: 0.74rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 8px; }
-        .kpi-value { font-family: 'JetBrains Mono', monospace; font-size: 1.55rem; font-weight: 700; letter-spacing: -0.01em; }
+        .kpi-label { font-size: 0.74rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 8px; white-space: nowrap; }
+        .kpi-value { font-family: 'JetBrains Mono', monospace; font-size: clamp(0.95rem, 2.1vw, 1.55rem); font-weight: 700; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
         .kpi-pos { color: var(--pos); }
         .kpi-neg { color: var(--neg); }
         .kpi-sub { font-size: 0.72rem; color: var(--muted); margin-top: 6px; font-family: 'JetBrains Mono', monospace; }
