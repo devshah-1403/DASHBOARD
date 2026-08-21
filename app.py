@@ -431,21 +431,21 @@ def inject_theme():
            into the same row and, if the strip is still too narrow (small
            screens), lets it scroll horizontally rather than wrap. */
         .hero-tiles {
-            display: grid; grid-auto-flow: column; grid-auto-columns: minmax(150px, 1fr);
-            gap: 12px; margin-bottom: 26px; overflow-x: auto; padding-bottom: 2px;
+            display: grid; grid-auto-flow: column; grid-auto-columns: minmax(130px, 1fr);
+            gap: 10px; margin-bottom: 26px; overflow-x: auto; padding-bottom: 2px;
         }
         .hero-tile {
             background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px;
-            padding: 13px 16px; min-width: 150px;
+            padding: 11px 14px; min-width: 130px;
         }
         .hero-tile-label {
-            font-size: 0.66rem; font-weight: 700; text-transform: uppercase;
-            letter-spacing: 0.05em; color: var(--muted); margin-bottom: 6px;
+            font-size: 0.58rem; font-weight: 700; text-transform: uppercase;
+            letter-spacing: 0.04em; color: var(--muted); margin-bottom: 6px;
             white-space: nowrap;
         }
         .hero-tile-value {
             font-family: 'Calibri', 'Carlito', 'Segoe UI', sans-serif;
-            font-size: 1.05rem; font-weight: 700; white-space: nowrap;
+            font-size: 0.88rem; font-weight: 700; white-space: nowrap;
         }
         .hero-tile-value.positive { color: var(--pos); }
         .hero-tile-value.negative { color: var(--neg); }
