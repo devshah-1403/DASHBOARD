@@ -373,9 +373,13 @@ def style_pnl_table(df, cols):
 
     fmt = {c: "₹{:,.2f}".format for c in cols if c in df.columns}
     styler = df.style.format(fmt)
+    # pandas >=2.1 renamed Styler.applymap -> Styler.map (and removed
+    # applymap entirely in pandas 3.x), so pick whichever exists at runtime.
+    color_fn = styler.map if hasattr(styler, "map") else styler.applymap
     for c in cols:
         if c in df.columns:
-            styler = styler.applymap(_color, subset=[c])
+            styler = color_fn(_color, subset=[c])
+            color_fn = styler.map if hasattr(styler, "map") else styler.applymap
     return styler
 
 
