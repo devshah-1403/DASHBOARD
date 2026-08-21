@@ -294,6 +294,68 @@ def inject_theme():
         .closed-rows { display: flex; justify-content: space-between; font-size: 0.72rem; color: var(--muted); margin-bottom: 4px; font-family: 'Calibri', 'Carlito', 'Segoe UI', sans-serif; }
         .closed-pnl { font-family: 'Calibri', 'Carlito', 'Segoe UI', sans-serif; font-weight: 700; font-size: 0.95rem; margin-top: 8px; }
 
+        /* Position table — borderless rows, just a thin separator line
+           between each position, replacing the boxed-card layout. */
+        .pos-table-wrap { overflow-x: auto; margin-bottom: 20px; }
+        .pos-table { width: 100%; min-width: 760px; border-collapse: collapse; }
+        .pos-table-head, .pos-table-row {
+            display: grid;
+            align-items: center;
+            column-gap: 14px;
+        }
+        .pos-table-head.cols-open, .pos-table-row.cols-open {
+            grid-template-columns: 1.5fr 0.8fr 0.8fr 1fr 1fr 1fr 1.2fr 1fr;
+        }
+        .pos-table-head.cols-closed, .pos-table-row.cols-closed {
+            grid-template-columns: 1.5fr 0.8fr 0.8fr 1fr 1fr 1fr 1.2fr;
+        }
+        .pos-table-head {
+            padding: 6px 6px 10px 6px;
+            border-bottom: 1px solid var(--border);
+        }
+        .pos-table-head > div {
+            font-size: 0.66rem; font-weight: 700; text-transform: uppercase;
+            letter-spacing: 0.05em; color: var(--muted);
+        }
+        .pos-table-row {
+            padding: 13px 6px;
+            border-bottom: 1px solid var(--border);
+            transition: background 0.15s ease;
+        }
+        .pos-table-row:hover { background: rgba(255,255,255,0.025); }
+        .pos-table-row:last-child { border-bottom: none; }
+        .pt-symbol { display: flex; align-items: baseline; gap: 8px; }
+        .pt-symbol-name { font-weight: 700; font-size: 0.9rem; letter-spacing: -0.01em; }
+        .pt-tag {
+            font-size: 0.58rem; font-weight: 700; padding: 1px 6px; border-radius: 999px;
+            border: 1px solid var(--border); color: var(--muted); text-transform: uppercase;
+        }
+        .pt-tag.long { color: var(--pos); border-color: rgba(46,230,166,0.3); }
+        .pt-tag.short { color: var(--neg); border-color: rgba(255,92,122,0.3); }
+        .pt-cell { font-family: 'Calibri', 'Carlito', 'Segoe UI', sans-serif; font-size: 0.85rem; font-weight: 600; }
+        .pt-cell.muted { color: var(--muted); font-weight: 500; font-size: 0.78rem; }
+        .pt-cell.pos { color: var(--pos); }
+        .pt-cell.neg { color: var(--neg); }
+        .pt-arrow { font-size: 0.72rem; margin-right: 2px; }
+
+        /* Leader row (top gain / least loss) — no box, just a soft glowing
+           left accent bar + tinted background so it stands out among plain
+           rows without reintroducing card borders. */
+        .pos-table-row.top-gain-row {
+            position: relative;
+            background: linear-gradient(90deg, rgba(124,92,255,0.10), transparent 60%);
+            border-left: 3px solid;
+            border-image: linear-gradient(180deg, #ff3cac, #784ba0, #2b86c5, #2ee6a6) 1;
+        }
+        .pt-leader-badge {
+            display: inline-flex; align-items: center; gap: 4px; margin-left: 8px;
+            font-size: 0.58rem; font-weight: 800; letter-spacing: 0.04em;
+            padding: 1px 8px; border-radius: 999px; text-transform: uppercase;
+            background: linear-gradient(90deg, #ff3cac, #784ba0, #2b86c5, #2ee6a6);
+            background-size: 300% 100%; animation: rgb-shift 3s linear infinite;
+            color: #05070d;
+        }
+
         /* Chart cards: st.markdown('<div class="chart-card">') + st.altair_chart(...) +
            st.markdown('</div>') used to be 3 SEPARATE calls — Streamlit renders each call
            as its own DOM node, so that div opened and closed empty and the real chart sat
@@ -745,7 +807,7 @@ def render_live(engine: "LiveEngine"):
 
             # Highest daily gain first, always — never a fixed/pinned order.
             # Positions with no price yet (None) sort to the bottom.
-            cards = []
+            rows_html = []
             sorted_rows = sorted(
                 rows,
                 key=lambda x: (_daily_gain_pct(x) is None, -(_daily_gain_pct(x) or 0)),
@@ -755,51 +817,52 @@ def render_live(engine: "LiveEngine"):
                 type_cls = "long" if pos_type == "LONG" else "short"
                 close = r.get("close")
                 day_pct = _daily_gain_pct(r)  # this position's actual gain/loss %, short-adjusted
-                day_cls = "day-pos" if (day_pct or 0) >= 0 else "day-neg"
-                day_txt = f"{'▲' if (day_pct or 0) >= 0 else '▼'} {abs(day_pct):.2f}%" if day_pct is not None else "–"
-                # The single best-performing card in this segment always gets
+                day_cls = "pt-cell pos" if (day_pct or 0) >= 0 else "pt-cell neg"
+                day_txt = f"{'+' if (day_pct or 0) >= 0 else ''}{day_pct:.2f}%" if day_pct is not None else "–"
+                # The single best-performing row in this segment always gets
                 # the glow — if it's a genuine gain it reads "Top Gain"; if
                 # every position in the segment is red today, the least-bad
                 # one still gets marked so there's always a clear leader.
                 is_top = idx == 0 and day_pct is not None
-                card_cls = "pos-card top-gain" if is_top else "pos-card"
+                row_cls = "pos-table-row cols-open top-gain-row" if is_top else "pos-table-row cols-open"
                 if is_top and day_pct > 0:
-                    badge_html = f'<span class="top-gain-badge">🔥 {label} Top Gain</span>'
+                    leader_badge = f'<span class="pt-leader-badge">🔥 Top Gain</span>'
                 elif is_top:
-                    badge_html = f'<span class="top-gain-badge">🛡️ {label} Least Loss</span>'
+                    leader_badge = f'<span class="pt-leader-badge">🛡️ Least Loss</span>'
                 else:
-                    badge_html = ""
+                    leader_badge = ""
                 mtm = r.get("mtm")
-                mtm_cls = "kpi-pos" if (mtm or 0) >= 0 else "kpi-neg"
-                cards.append(flat(f"""
-                    <div class="{card_cls}">
-                        {badge_html}
-                        <div class="pos-top">
-                            <div>
-                                <div class="pos-symbol">{r.get('symbol', '-')}</div>
-                                <div class="pos-tags">
-                                    <span class="pos-chip">{r.get('exchange', '-')}</span>
-                                    <span class="pos-chip {type_cls}">{pos_type}</span>
-                                </div>
-                            </div>
-                            <span class="pos-daychg {day_cls}">{day_txt}</span>
+                mtm_cls = "pt-cell pos" if (mtm or 0) >= 0 else "pt-cell neg"
+                mtm_arrow = "▲" if (mtm or 0) >= 0 else "▼"
+                rows_html.append(flat(f"""
+                    <div class="{row_cls}">
+                        <div class="pt-symbol">
+                            <span class="pt-symbol-name">{r.get('symbol', '-')}</span>
+                            <span class="pt-tag {type_cls}">{pos_type}</span>
+                            {leader_badge}
                         </div>
-                        <div class="pos-rows">
-                            <div><div class="pos-row-label">Qty</div><div class="pos-row-value">{fmt_qty(r.get('qty'))}</div></div>
-                            <div><div class="pos-row-label">Avg Price</div><div class="pos-row-value">{fmt_money(r.get('avgPrice'))}</div></div>
-                            <div><div class="pos-row-label">CMP</div><div class="pos-row-value">{fmt_money(r.get('ltp'))}</div></div>
-                            <div><div class="pos-row-label">Prev Close</div><div class="pos-row-value">{fmt_money(close)}</div></div>
-                        </div>
-                        <div class="pos-mtm-block">
-                            <div>
-                                <div class="pos-mtm-label">MTM</div>
-                                <div class="pos-mtm-value {mtm_cls}">{fmt_money(mtm)}</div>
-                            </div>
-                            <div class="pos-tick">🕐 {fmt_datetime(r.get('ts'))}</div>
-                        </div>
+                        <div class="pt-cell muted">{r.get('exchange', '-')}</div>
+                        <div class="pt-cell">{fmt_qty(r.get('qty'))}</div>
+                        <div class="pt-cell">{fmt_money(r.get('avgPrice'))}</div>
+                        <div class="pt-cell">{fmt_money(r.get('ltp'))}</div>
+                        <div class="{day_cls}">{day_txt}</div>
+                        <div class="{mtm_cls}">{mtm_arrow} {fmt_money(mtm)}</div>
+                        <div class="pt-cell muted">{fmt_datetime(r.get('ts'))}</div>
                     </div>
                 """))
-            st.markdown(f'<div class="pos-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
+            table_html = flat(f"""
+                <div class="pos-table-wrap">
+                    <div class="pos-table">
+                        <div class="pos-table-head cols-open">
+                            <div>Symbol</div><div>Exchange</div><div>Qty</div>
+                            <div>Avg Price</div><div>CMP</div><div>Day Chg %</div>
+                            <div>MTM P&amp;L</div><div>Last Tick</div>
+                        </div>
+                        {"".join(rows_html)}
+                    </div>
+                </div>
+            """)
+            st.markdown(table_html, unsafe_allow_html=True)
 
     with tab_closed:
         if not engine.closed_positions:
@@ -820,41 +883,30 @@ def render_live(engine: "LiveEngine"):
                 dates = [t.get("SellDate") for t in c.get("Trades", []) if t.get("SellDate")]
                 return max(dates) if dates else None
 
-            def closed_card(c, is_top=False, segment_label=""):
+            def closed_row_html(c, is_top=False):
                 pnl = c["BookedPnL"]
-                pnl_cls = "kpi-pos" if pnl >= 0 else "kpi-neg"
-                card_cls = "pos-card top-gain" if is_top else "pos-card"
+                pnl_cls = "pt-cell pos" if pnl >= 0 else "pt-cell neg"
+                pnl_arrow = "▲" if pnl >= 0 else "▼"
+                row_cls = "pos-table-row cols-closed top-gain-row" if is_top else "pos-table-row cols-closed"
                 if is_top and pnl > 0:
-                    badge_html = f'<span class="top-gain-badge">🔥 {segment_label} Top Gain</span>'
+                    leader_badge = '<span class="pt-leader-badge">🔥 Top Gain</span>'
                 elif is_top:
-                    badge_html = f'<span class="top-gain-badge">🛡️ {segment_label} Least Loss</span>'
+                    leader_badge = '<span class="pt-leader-badge">🛡️ Least Loss</span>'
                 else:
-                    badge_html = ""
+                    leader_badge = ""
                 sell_date = fmt_sell_date(_closed_sell_date(c))
                 return flat(f"""
-                    <div class="{card_cls}">
-                        {badge_html}
-                        <div class="pos-top">
-                            <div>
-                                <div class="pos-symbol">{c.get('Symbol', '-')}</div>
-                                <div class="pos-tags">
-                                    <span class="pos-chip">{c.get('Exchange', '-')}</span>
-                                    <span class="pos-chip">{c.get('Segment', '-')}</span>
-                                </div>
-                            </div>
+                    <div class="{row_cls}">
+                        <div class="pt-symbol">
+                            <span class="pt-symbol-name">{c.get('Symbol', '-')}</span>
+                            {leader_badge}
                         </div>
-                        <div class="pos-rows">
-                            <div><div class="pos-row-label">Qty</div><div class="pos-row-value">{fmt_qty(c.get('Qty'))}</div></div>
-                            <div><div class="pos-row-label">Avg Buy</div><div class="pos-row-value">{fmt_money(c.get('AvgBuyPrice'))}</div></div>
-                            <div><div class="pos-row-label">Avg Sell</div><div class="pos-row-value">{fmt_money(c.get('AvgSellPrice'))}</div></div>
-                            <div><div class="pos-row-label">Sell Date</div><div class="pos-row-value">{sell_date}</div></div>
-                        </div>
-                        <div class="pos-mtm-block">
-                            <div>
-                                <div class="pos-mtm-label">Booked P&amp;L</div>
-                                <div class="pos-mtm-value {pnl_cls}">{fmt_money(pnl)}</div>
-                            </div>
-                        </div>
+                        <div class="pt-cell muted">{c.get('Exchange', '-')}</div>
+                        <div class="pt-cell">{fmt_qty(c.get('Qty'))}</div>
+                        <div class="pt-cell">{fmt_money(c.get('AvgBuyPrice'))}</div>
+                        <div class="pt-cell">{fmt_money(c.get('AvgSellPrice'))}</div>
+                        <div class="pt-cell muted">{sell_date}</div>
+                        <div class="{pnl_cls}">{pnl_arrow} {fmt_money(pnl)}</div>
                     </div>
                 """)
 
@@ -896,20 +948,31 @@ def render_live(engine: "LiveEngine"):
                     ]),
                     unsafe_allow_html=True,
                 )
-                # Whichever card has the single highest booked P&L in this
+                # Whichever row has the single highest booked P&L in this
                 # segment always gets the glow — a genuine gain reads "Top
                 # Gain", otherwise the least-bad loss reads "Least Loss".
                 sorted_rows = sorted(rows, key=lambda x: x["BookedPnL"], reverse=True)
                 best_pnl = max((c["BookedPnL"] for c in rows), default=None)
-                seg_cards = [
-                    closed_card(
+                rows_html = [
+                    closed_row_html(
                         c,
                         is_top=(best_pnl is not None and c["BookedPnL"] == best_pnl),
-                        segment_label=label,
                     )
                     for c in sorted_rows
                 ]
-                st.markdown(f'<div class="pos-grid">{"".join(seg_cards)}</div>', unsafe_allow_html=True)
+                table_html = flat(f"""
+                    <div class="pos-table-wrap">
+                        <div class="pos-table">
+                            <div class="pos-table-head cols-closed">
+                                <div>Symbol</div><div>Exchange</div><div>Qty</div>
+                                <div>Avg Buy</div><div>Avg Sell</div><div>Sell Date</div>
+                                <div>Booked P&amp;L</div>
+                            </div>
+                            {"".join(rows_html)}
+                        </div>
+                    </div>
+                """)
+                st.markdown(table_html, unsafe_allow_html=True)
 
             # ── Charts (combined across segments) — rendered below every
             # position card section so cards stay the primary focus. Chart 1
