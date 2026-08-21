@@ -1130,7 +1130,16 @@ def render_live(engine: "LiveEngine"):
                         legs.append({"SellDate": t["SellDate"], "Pnl": t["Pnl"], "Segment": p.get("Segment", "Other")})
 
             if legs:
-                chart_df = pd.DataFrame(legs).sort_values("SellDate")
+                # Multiple FIFO legs can share the exact same SellDate (e.g.
+                # several lots/symbols closed on one day). If we cumsum one
+                # row per leg, ties on SellDate get an arbitrary order, which
+                # produces a zig-zagging line and — since the tooltip snaps to
+                # the nearest x — a hover value that doesn't match what's
+                # visually plotted at that point. Collapse to one point per
+                # calendar day first so the x-axis is strictly increasing.
+                chart_df = pd.DataFrame(legs)
+                chart_df["SellDate"] = pd.to_datetime(chart_df["SellDate"]).dt.normalize()
+                chart_df = chart_df.groupby("SellDate", as_index=False)["Pnl"].sum().sort_values("SellDate")
                 chart_df["Cumulative"] = chart_df["Pnl"].cumsum()
                 with st.container(border=True):
                     st.markdown('<div class="section-label">Cumulative booked profit over time (Equity)</div>', unsafe_allow_html=True)
