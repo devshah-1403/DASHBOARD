@@ -374,6 +374,51 @@ def inject_theme():
         }
 
         div[data-testid="stMetric"] { display: none; }  /* using custom KPI cards instead */
+
+        /* Hero MTM block — big headline number + status pill, used for the
+           top-of-dashboard "Live position MTM" and the closed-tab "Booked
+           ledger" summary. */
+        .hero-block {
+            display: flex; justify-content: space-between; align-items: flex-start;
+            flex-wrap: wrap; gap: 14px; margin-bottom: 18px;
+        }
+        .hero-label {
+            display: flex; align-items: center; gap: 8px;
+            font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+            letter-spacing: 0.08em; color: var(--muted); margin-bottom: 10px;
+        }
+        .hero-label .dot { width: 6px; height: 6px; border-radius: 50%; }
+        .hero-label .dot.positive { background: var(--pos); box-shadow: 0 0 8px var(--pos); }
+        .hero-label .dot.negative { background: var(--neg); box-shadow: 0 0 8px var(--neg); }
+        .hero-value {
+            font-family: 'Calibri', 'Carlito', 'Segoe UI', sans-serif;
+            font-size: clamp(1.9rem, 4.2vw, 3rem); font-weight: 800; letter-spacing: -0.02em;
+            line-height: 1.1;
+        }
+        .hero-value.positive { color: var(--pos); }
+        .hero-value.negative { color: var(--neg); }
+        .hero-sub { font-size: 0.82rem; color: var(--muted); margin-top: 6px; }
+        .hero-pill {
+            display: inline-flex; align-items: center; gap: 6px;
+            padding: 7px 16px; border-radius: 999px; font-size: 0.72rem; font-weight: 700;
+            letter-spacing: 0.04em; text-transform: uppercase; border: 1px solid; white-space: nowrap;
+        }
+        .hero-pill.positive { color: var(--pos); border-color: rgba(46,230,166,0.4); background: rgba(46,230,166,0.08); }
+        .hero-pill.negative { color: var(--neg); border-color: rgba(255,92,122,0.4); background: rgba(255,92,122,0.08); }
+
+        /* Plain bordered stat tiles under a hero block. */
+        .hero-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 26px; }
+        .hero-tile { background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 13px 16px; }
+        .hero-tile-label {
+            font-size: 0.66rem; font-weight: 700; text-transform: uppercase;
+            letter-spacing: 0.05em; color: var(--muted); margin-bottom: 6px;
+        }
+        .hero-tile-value {
+            font-family: 'Calibri', 'Carlito', 'Segoe UI', sans-serif;
+            font-size: 1.05rem; font-weight: 700;
+        }
+        .hero-tile-value.positive { color: var(--pos); }
+        .hero-tile-value.negative { color: var(--neg); }
         </style>
         """,
         unsafe_allow_html=True,
@@ -424,6 +469,31 @@ def seg_summary_line(items):
         for lbl, val, cls in items
     )
     return flat(f'<div class="seg-summary">{stats}</div>')
+
+
+def hero_block(label, value, sub, is_positive, pill_text):
+    sign_cls = "positive" if is_positive else "negative"
+    return flat(f"""
+        <div class="hero-block">
+            <div>
+                <div class="hero-label"><span class="dot {sign_cls}"></span>{label}</div>
+                <div class="hero-value {sign_cls}">{value}</div>
+                <div class="hero-sub">{sub}</div>
+            </div>
+            <div class="hero-pill {sign_cls}">{'▲' if is_positive else '▼'} {pill_text}</div>
+        </div>
+    """)
+
+
+def hero_tiles(items):
+    """items: list of (label, value_html, extra_css_class) tuples rendered
+    as plain bordered stat boxes under a hero_block."""
+    tiles = "".join(
+        f'<div class="hero-tile"><div class="hero-tile-label">{lbl}</div>'
+        f'<div class="hero-tile-value {cls}">{val}</div></div>'
+        for lbl, val, cls in items
+    )
+    return flat(f'<div class="hero-tiles">{tiles}</div>')
 
 
 # ── Password gate ─────────────────────────────────────────────────────────
@@ -741,15 +811,27 @@ def render_live(engine: "LiveEngine"):
     day_pnl_pct = (day_pnl_total / investment_value * 100) if investment_value else 0.0
 
     st.markdown(
-        flat(f"""
-        <div class="kpi-grid">
-            {kpi_card("Investment Value", fmt_money(investment_value), sub=f"{len(ticks)} instruments · cost basis")}
-            {kpi_card("Today's P&amp;L", fmt_money(day_pnl_total), positive=day_pnl_total >= 0, sub=f"{'+' if day_pnl_pct >= 0 else ''}{day_pnl_pct:.2f}% vs prev close")}
-            {kpi_card("Open MTM", fmt_money(current_mtm), positive=current_mtm >= 0, sub=f"Eq {fmt_money(eq_mtm)} · F&amp;O {fmt_money(fo_mtm)}")}
-            {kpi_card("Booked MTM", fmt_money(engine.booked_mtm_total), positive=engine.booked_mtm_total >= 0, sub=f"{len(engine.closed_positions)} closed positions")}
-            {kpi_card("Total MTM", fmt_money(total_mtm), positive=total_mtm >= 0, sub="Booked + Open, live")}
-        </div>
-        """),
+        hero_block(
+            "Live Position MTM",
+            fmt_money(total_mtm),
+            "current MTM — booked plus open",
+            is_positive=total_mtm >= 0,
+            pill_text="Profit" if total_mtm >= 0 else "Loss",
+        ),
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        hero_tiles([
+            ("Investment Value", fmt_money(investment_value), ""),
+            (
+                "Today's P&L",
+                f"{fmt_money(day_pnl_total)} ({'+' if day_pnl_pct >= 0 else ''}{day_pnl_pct:.2f}%)",
+                "positive" if day_pnl_total >= 0 else "negative",
+            ),
+            ("Booked MTM", fmt_money(engine.booked_mtm_total), "positive" if engine.booked_mtm_total >= 0 else "negative"),
+            ("Open MTM", fmt_money(current_mtm), "positive" if current_mtm >= 0 else "negative"),
+            ("Current MTM", fmt_money(total_mtm), "positive" if total_mtm >= 0 else "negative"),
+        ]),
         unsafe_allow_html=True,
     )
 
@@ -873,9 +955,42 @@ def render_live(engine: "LiveEngine"):
             losses = len(closed) - wins
             win_rate = wins / len(closed) * 100 if closed else 0
 
+            # All realized FIFO trade legs across every closed position —
+            # used for the leg count, best/worst single trade, and the
+            # average P&L per realized trade below.
+            all_legs = [
+                (t.get("Pnl", 0.0), p.get("Symbol", "-"))
+                for p in closed for t in p.get("Trades", [])
+            ]
+            realized_trades = len(all_legs)
+            if all_legs:
+                best_pnl, best_symbol = max(all_legs, key=lambda x: x[0])
+                worst_pnl, worst_symbol = min(all_legs, key=lambda x: x[0])
+            else:
+                best_pnl = worst_pnl = 0.0
+                best_symbol = worst_symbol = "-"
+            avg_pnl_trade = (engine.booked_mtm_total / realized_trades) if realized_trades else 0.0
+
             st.markdown(
-                f'<div class="section-label">All closed positions <span class="badge">{len(closed)}</span> '
-                f'<span class="badge">Win rate {win_rate:.0f}%</span></div>',
+                hero_block(
+                    "Booked Ledger — from trade ledger FIFO",
+                    fmt_money(engine.booked_mtm_total),
+                    "total booked profit",
+                    is_positive=engine.booked_mtm_total >= 0,
+                    pill_text="Booked",
+                ),
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                hero_tiles([
+                    ("Closed Positions", str(len(closed)), ""),
+                    ("Realized Trades (FIFO Legs)", str(realized_trades), ""),
+                    ("Win Rate", f"{win_rate:.0f}%", ""),
+                    ("Best Trade", f"{best_symbol} · {fmt_money(best_pnl)}", "positive" if best_pnl >= 0 else "negative"),
+                    ("Worst Trade", f"{worst_symbol} · {fmt_money(worst_pnl)}", "positive" if worst_pnl >= 0 else "negative"),
+                    ("Avg P&L / Trade", fmt_money(avg_pnl_trade), "positive" if avg_pnl_trade >= 0 else "negative"),
+                    ("Current Open MTM", fmt_money(current_mtm), "positive" if current_mtm >= 0 else "negative"),
+                ]),
                 unsafe_allow_html=True,
             )
 
@@ -974,15 +1089,16 @@ def render_live(engine: "LiveEngine"):
                 """)
                 st.markdown(table_html, unsafe_allow_html=True)
 
-            # ── Charts (combined across segments) — rendered below every
-            # position card section so cards stay the primary focus. Chart 1
-            # stays full-width since a date axis needs the room; charts 2
-            # and 3 are compact enough to share a row.
-            # Chart 1: cumulative booked profit over time (all segments with
-            # a usable sell date; F&O sell dates aren't always present in
-            # this ledger format, so that segment may be partial).
+            # ── Charts — rendered below every position table so tables stay
+            # the primary focus. Chart 1 stays full-width since a date axis
+            # needs the room; charts 2 and 3 are compact enough to share a row.
+            # Chart 1: cumulative booked profit over time, EQUITY ONLY — F&O
+            # legs are intentionally excluded so the trend line reflects pure
+            # equity performance and isn't skewed by F&O's larger swings.
             legs = []
             for p in closed:
+                if p.get("Segment") != "Equity":
+                    continue
                 for t in p.get("Trades", []):
                     if t.get("SellDate"):
                         legs.append({"SellDate": t["SellDate"], "Pnl": t["Pnl"], "Segment": p.get("Segment", "Other")})
@@ -991,7 +1107,7 @@ def render_live(engine: "LiveEngine"):
                 chart_df = pd.DataFrame(legs).sort_values("SellDate")
                 chart_df["Cumulative"] = chart_df["Pnl"].cumsum()
                 with st.container(border=True):
-                    st.markdown('<div class="section-label">Cumulative booked profit over time</div>', unsafe_allow_html=True)
+                    st.markdown('<div class="section-label">Cumulative booked profit over time (Equity)</div>', unsafe_allow_html=True)
                     area = alt.Chart(chart_df).mark_area(
                         line={"color": "#34d5c8", "strokeWidth": 2},
                         interpolate="monotone",
