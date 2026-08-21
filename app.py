@@ -33,6 +33,7 @@ LIVE UPDATES
 """
 import io
 import os
+import re
 import threading
 import time
 from datetime import datetime
@@ -259,16 +260,33 @@ def status_pill(state: str, label: str) -> str:
     return f'<span class="status-pill {cls}"><span class="status-dot"></span>{label}</span>'
 
 
+def flat(html: str) -> str:
+    """Collapse a multi-line, indented HTML f-string to a single line.
+
+    Streamlit's markdown renderer runs HTML through a CommonMark parser
+    before allowing it through. An HTML block continues being treated as
+    raw HTML only until a blank line; after that, any line indented 4+
+    spaces (which our nested Python f-strings produce naturally) is read
+    as an *indented code block* and shown as literal text instead of being
+    rendered — this is what caused the closed-position cards to print
+    "<div class=..." as visible text after the first card. Stripping all
+    newlines/indentation removes any chance of a stray blank line or deep
+    indentation confusing the parser, regardless of how deeply the
+    generating Python code is nested.
+    """
+    return re.sub(r"\s*\n\s*", "", html.strip())
+
+
 def kpi_card(label, value, positive=None, sub=None):
     cls = "kpi-pos" if positive is True else ("kpi-neg" if positive is False else "")
     sub_html = f'<div class="kpi-sub">{sub}</div>' if sub else ""
-    return f"""
+    return flat(f"""
         <div class="kpi-card">
             <div class="kpi-label">{label}</div>
             <div class="kpi-value {cls}">{value}</div>
             {sub_html}
         </div>
-    """
+    """)
 
 
 # ── Password gate ─────────────────────────────────────────────────────────
@@ -283,12 +301,12 @@ def check_password():
 
     inject_theme()
     st.markdown(
-        """
+        flat("""
         <div class="db-title" style="justify-content:center; margin: 60px 0 24px 0;">
             <div class="db-icon">📊</div>
             <h1>Booked Profit Dashboard</h1>
         </div>
-        """,
+        """),
         unsafe_allow_html=True,
     )
     c1, c2, c3 = st.columns([1, 1, 1])
@@ -511,7 +529,7 @@ def render_live(engine: "LiveEngine"):
         status_html = status_pill("live", f"Live • last tick {age}")
 
     st.markdown(
-        f"""
+        flat(f"""
         <div class="top-bar">
             {status_html}
             <div class="top-clock">
@@ -520,7 +538,7 @@ def render_live(engine: "LiveEngine"):
                 <span class="tz-badge">IST</span>
             </div>
         </div>
-        """,
+        """),
         unsafe_allow_html=True,
     )
 
@@ -553,7 +571,7 @@ def render_live(engine: "LiveEngine"):
     day_pnl_pct = (day_pnl_total / investment_value * 100) if investment_value else 0.0
 
     st.markdown(
-        f"""
+        flat(f"""
         <div class="kpi-grid">
             {kpi_card("Investment Value", fmt_money(investment_value), sub=f"{len(ticks)} instruments · cost basis")}
             {kpi_card("Today's P&amp;L", fmt_money(day_pnl_total), positive=day_pnl_total >= 0, sub=f"{'+' if day_pnl_pct >= 0 else ''}{day_pnl_pct:.2f}% vs prev close")}
@@ -561,7 +579,7 @@ def render_live(engine: "LiveEngine"):
             {kpi_card("Booked MTM", fmt_money(engine.booked_mtm_total), positive=engine.booked_mtm_total >= 0, sub=f"{len(engine.closed_positions)} closed positions")}
             {kpi_card("Total MTM", fmt_money(total_mtm), positive=total_mtm >= 0, sub="Booked + Open, live")}
         </div>
-        """,
+        """),
         unsafe_allow_html=True,
     )
 
@@ -585,7 +603,7 @@ def render_live(engine: "LiveEngine"):
                 day_txt = f"{'▲' if (day_pct or 0) >= 0 else '▼'} {abs(day_pct):.2f}%" if day_pct is not None else "–"
                 mtm = r.get("mtm")
                 mtm_cls = "kpi-pos" if (mtm or 0) >= 0 else "kpi-neg"
-                cards.append(f"""
+                cards.append(flat(f"""
                     <div class="pos-card">
                         <div class="pos-top">
                             <div>
@@ -611,7 +629,7 @@ def render_live(engine: "LiveEngine"):
                             <div class="pos-tick">🕐 {fmt_time(r.get('ts'))}</div>
                         </div>
                     </div>
-                """)
+                """))
             st.markdown(f'<div class="pos-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
 
     with tab_closed:
@@ -633,7 +651,7 @@ def render_live(engine: "LiveEngine"):
             for c in sorted(closed, key=lambda x: x["BookedPnL"]):
                 pnl = c["BookedPnL"]
                 pnl_cls = "kpi-pos" if pnl >= 0 else "kpi-neg"
-                cards.append(f"""
+                cards.append(flat(f"""
                     <div class="closed-card">
                         <div class="closed-top">
                             <div class="closed-symbol">{c.get('Symbol', '-')}</div>
@@ -645,7 +663,7 @@ def render_live(engine: "LiveEngine"):
                         <div class="closed-rows"><span>Avg Sell</span><span>{fmt_money(c.get('AvgSellPrice'))}</span></div>
                         <div class="closed-pnl {pnl_cls}">{fmt_money(pnl)}</div>
                     </div>
-                """)
+                """))
             st.markdown(f'<div class="closed-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
 
             # ── Chart 1: cumulative booked profit over time (all segments
@@ -727,14 +745,14 @@ def main():
     inject_theme()
 
     st.markdown(
-        """
+        flat("""
         <div class="db-header">
             <div class="db-title">
                 <div class="db-icon">📊</div>
                 <h1>Booked Profit Dashboard</h1>
             </div>
         </div>
-        """,
+        """),
         unsafe_allow_html=True,
     )
 
