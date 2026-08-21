@@ -757,11 +757,18 @@ def render_live(engine: "LiveEngine"):
                 day_pct = _daily_gain_pct(r)  # this position's actual gain/loss %, short-adjusted
                 day_cls = "day-pos" if (day_pct or 0) >= 0 else "day-neg"
                 day_txt = f"{'▲' if (day_pct or 0) >= 0 else '▼'} {abs(day_pct):.2f}%" if day_pct is not None else "–"
-                # Only the single leader gets the glow, and only if it actually
-                # has a real gain (skip the glow if the top spot is a loss/None).
-                is_top = idx == 0 and day_pct is not None and day_pct > 0
+                # The single best-performing card in this segment always gets
+                # the glow — if it's a genuine gain it reads "Top Gain"; if
+                # every position in the segment is red today, the least-bad
+                # one still gets marked so there's always a clear leader.
+                is_top = idx == 0 and day_pct is not None
                 card_cls = "pos-card top-gain" if is_top else "pos-card"
-                badge_html = f'<span class="top-gain-badge">🔥 {label} Top Gain</span>' if is_top else ""
+                if is_top and day_pct > 0:
+                    badge_html = f'<span class="top-gain-badge">🔥 {label} Top Gain</span>'
+                elif is_top:
+                    badge_html = f'<span class="top-gain-badge">🛡️ {label} Least Loss</span>'
+                else:
+                    badge_html = ""
                 mtm = r.get("mtm")
                 mtm_cls = "kpi-pos" if (mtm or 0) >= 0 else "kpi-neg"
                 cards.append(flat(f"""
@@ -817,7 +824,12 @@ def render_live(engine: "LiveEngine"):
                 pnl = c["BookedPnL"]
                 pnl_cls = "kpi-pos" if pnl >= 0 else "kpi-neg"
                 card_cls = "pos-card top-gain" if is_top else "pos-card"
-                badge_html = f'<span class="top-gain-badge">🔥 {segment_label} Top Gain</span>' if is_top else ""
+                if is_top and pnl > 0:
+                    badge_html = f'<span class="top-gain-badge">🔥 {segment_label} Top Gain</span>'
+                elif is_top:
+                    badge_html = f'<span class="top-gain-badge">🛡️ {segment_label} Least Loss</span>'
+                else:
+                    badge_html = ""
                 sell_date = fmt_sell_date(_closed_sell_date(c))
                 return flat(f"""
                     <div class="{card_cls}">
@@ -884,14 +896,15 @@ def render_live(engine: "LiveEngine"):
                     ]),
                     unsafe_allow_html=True,
                 )
-                # Whichever card has the single highest booked P&L (and it's
-                # actually a gain) gets the glow, regardless of grid position.
+                # Whichever card has the single highest booked P&L in this
+                # segment always gets the glow — a genuine gain reads "Top
+                # Gain", otherwise the least-bad loss reads "Least Loss".
                 sorted_rows = sorted(rows, key=lambda x: x["BookedPnL"], reverse=True)
                 best_pnl = max((c["BookedPnL"] for c in rows), default=None)
                 seg_cards = [
                     closed_card(
                         c,
-                        is_top=(best_pnl is not None and best_pnl > 0 and c["BookedPnL"] == best_pnl),
+                        is_top=(best_pnl is not None and c["BookedPnL"] == best_pnl),
                         segment_label=label,
                     )
                     for c in sorted_rows
