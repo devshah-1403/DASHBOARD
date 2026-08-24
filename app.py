@@ -833,6 +833,20 @@ NEWS_TITLE_BLOCKLIST = (
     "share price today", "stock price live", "share price live",
     "nse/bse updates", "share price nse", "stock price nse",
 )
+
+# Broad market-recap headlines. These only ever leak in for index symbols
+# (NIFTY, BANKNIFTY, SENSEX, FINNIFTY, ...) since intitle:"<symbol>" happily
+# matches "Nifty ends lower", "Sensex settles ... points" daily-wrap stories
+# that aren't actually news about a specific holding — they're the general
+# market-close roundup that runs every trading day regardless. Applied only
+# when the symbol itself is an index, so it never touches real stock tickers.
+INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "NIFTY50", "NIFTY 50"}
+MARKET_WRAP_BLOCKLIST = (
+    "closing bell", "sensex settles", "sensex falls", "sensex ends",
+    "sensex closes", "stock market today", "market today", "nifty ends",
+    "nifty trades", "nifty settles", "nifty closes", "taking stock",
+    "opening bell", "market wrap", "sensex, nifty", "nifty, sensex",
+)
 NEWS_MAX_AGE_DAYS = 7
 
 
@@ -904,6 +918,7 @@ def fetch_stock_news(symbol: str, per_source_max: int = 8, total_max: int = 25):
 
     now = datetime.utcnow()
     cutoff = now - timedelta(days=NEWS_MAX_AGE_DAYS)
+    is_index = symbol.strip().upper() in INDEX_SYMBOLS
     filtered = []
     seen_keys = set()  # (normalized title, link) — Google News RSS can hand
                         # back the same story twice for one source query
@@ -916,6 +931,8 @@ def fetch_stock_news(symbol: str, per_source_max: int = 8, total_max: int = 25):
             continue
         low = it["title"].lower()
         if any(p in low for p in NEWS_TITLE_BLOCKLIST):
+            continue
+        if is_index and any(p in low for p in MARKET_WRAP_BLOCKLIST):
             continue
         dedup_key = (re.sub(r"\s+", " ", low).strip(), it["link"])
         if dedup_key in seen_keys:
