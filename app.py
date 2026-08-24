@@ -40,6 +40,7 @@ import re
 import threading
 import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
@@ -776,11 +777,18 @@ def get_engine(apps_script_url: str, sheet_name: str | None):
 # ── News ─────────────────────────────────────────────────────────────────
 # No single free API covers NSE + BSE + Mint + Business Standard + Times of
 # India + more with one key, so instead this queries Google News' public RSS
-# search (no key/auth needed) and restricts it to those publishers via
-# site: filters. Google News indexes their full archives, not just today,
-# so this also surfaces older ("past") coverage for a symbol, not only
-# breaking news — closer to what was actually asked for than a live-only
-# feed would be.
+# search (no key/auth needed), restricted to those publishers. Google News
+# indexes each outlet's full archive, not just today, so this also surfaces
+# older ("past") coverage for a symbol, not only breaking news.
+#
+# IMPORTANT: this deliberately does ONE separate query PER source rather
+# than one query with all sources OR'd together. A single query like
+# "SYMBOL stock (site:a.com OR site:b.com OR ... 9 sites)" makes Google
+# News quietly loosen/drop terms it can't satisfy well across that many
+# OR'd site: filters — which is how unrelated pages (a generic BSE listing
+# page, an F1 racing article, an "Option Chain" static page) were slipping
+# into results. Splitting into 9 narrow per-source queries — each requiring
+# the ticker literally in the headline via intitle: — avoids that entirely.
 NEWS_SOURCES = {
     "NSE": "nseindia.com",
     "BSE": "bseindia.com",
@@ -794,23 +802,10 @@ NEWS_SOURCES = {
 }
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def fetch_stock_news(symbol: str, max_items: int = 12):
-    """Latest + past coverage for one symbol, across NEWS_SOURCES, via
-    Google News RSS. Returns a list of {title, source, link, published}
-    dicts, newest first. Cached 30 min per symbol so switching tabs or the
-    live-tick refresh loop doesn't re-hit Google News on every rerun.
-    """
-    site_filter = " OR ".join(f"site:{d}" for d in NEWS_SOURCES.values())
-    query = f'{symbol} stock ({site_filter})'
-    url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-IN&gl=IN&ceid=IN:en"
-
-    resp = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
-    resp.raise_for_status()
-    root = ET.fromstring(resp.content)
-
+def _parse_news_rss(xml_bytes):
+    root = ET.fromstring(xml_bytes)
     items = []
-    for item in root.findall(".//item")[:max_items]:
+    for item in root.findall(".//item"):
         title = (item.findtext("title") or "").strip()
         link = (item.findtext("link") or "").strip()
         pub_date = (item.findtext("pubDate") or "").strip()
@@ -826,11 +821,52 @@ def fetch_stock_news(symbol: str, max_items: int = 12):
             title, source = title.rsplit(" - ", 1)
         try:
             dt = datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %Z")
-            published = dt.strftime("%d %b %Y, %I:%M %p")
         except ValueError:
-            published = pub_date
-        items.append({"title": title, "source": source, "link": link, "published": published})
+            dt = None
+        items.append({"title": title, "source": source, "link": link, "dt": dt, "pub_date_raw": pub_date})
     return items
+
+
+def _fetch_one_source(symbol, domain, max_items):
+    # intitle: forces the ticker to literally appear in the headline —
+    # this is what actually keeps results on-topic, far more than any
+    # amount of extra keywords in the query body would.
+    query = f'intitle:"{symbol}" site:{domain}'
+    url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-IN&gl=IN&ceid=IN:en"
+    resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+    resp.raise_for_status()
+    return _parse_news_rss(resp.content)[:max_items]
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_stock_news(symbol: str, per_source_max: int = 6, total_max: int = 25):
+    """Latest + past coverage for one symbol, queried separately per source
+    in NEWS_SOURCES (see module note above for why), merged and sorted
+    newest-first. Cached 30 min per symbol so switching tabs or the
+    live-tick refresh loop doesn't re-hit Google News on every rerun.
+    Returns a list of {title, source, link, published} dicts.
+    """
+    merged = []
+    with ThreadPoolExecutor(max_workers=len(NEWS_SOURCES)) as pool:
+        futures = {
+            pool.submit(_fetch_one_source, symbol, domain, per_source_max): name
+            for name, domain in NEWS_SOURCES.items()
+        }
+        for fut in as_completed(futures):
+            try:
+                merged.extend(fut.result())
+            except requests.RequestException:
+                continue  # one source failing shouldn't sink the whole fetch
+
+    # Newest first; items with an unparseable date sort to the end rather
+    # than crashing the sort or clumping at the top.
+    merged.sort(key=lambda it: it["dt"] or datetime.min, reverse=True)
+
+    out = []
+    for it in merged[:total_max]:
+        published = it["dt"].strftime("%d %b %Y, %I:%M %p") if it["dt"] else it["pub_date_raw"]
+        out.append({"title": it["title"], "source": it["source"], "link": it["link"], "published": published})
+    return out
 
 
 def render_news_section(symbols: list[str]):
@@ -840,13 +876,14 @@ def render_news_section(symbols: list[str]):
     picked = st.selectbox("Stock", options=symbols, key="_news_symbol")
     if not picked:
         return
-    try:
-        items = fetch_stock_news(picked)
-    except requests.RequestException as exc:
-        st.error(f"Couldn't fetch news for {picked}: {exc}")
-        return
+    with st.spinner(f"Fetching news for {picked}..."):
+        try:
+            items = fetch_stock_news(picked)
+        except Exception as exc:
+            st.error(f"Couldn't fetch news for {picked}: {exc}")
+            return
     if not items:
-        st.caption(f"No recent coverage found for {picked} across the tracked sources.")
+        st.caption(f"No headlines found with \"{picked}\" in the title across the tracked sources.")
         return
     for it in items:
         meta = it["source"] + (" · " + it["published"] if it["published"] else "")
@@ -859,7 +896,7 @@ def render_news_section(symbols: list[str]):
             """),
             unsafe_allow_html=True,
         )
-    st.caption("Sourced via Google News across NSE, BSE, Mint, Business Standard, "
+    st.caption(f"Headlines with \"{picked}\" in the title, across NSE, BSE, Mint, Business Standard, "
                "Times of India, Economic Times, Moneycontrol, CNBC-TV18 and Reuters. "
                "Cached 30 min per stock.")
 
