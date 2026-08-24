@@ -905,6 +905,9 @@ def fetch_stock_news(symbol: str, per_source_max: int = 8, total_max: int = 25):
     now = datetime.utcnow()
     cutoff = now - timedelta(days=NEWS_MAX_AGE_DAYS)
     filtered = []
+    seen_keys = set()  # (normalized title, link) — Google News RSS can hand
+                        # back the same story twice for one source query
+                        # (syndication/pagination overlap); drop the repeat.
     for it in merged:
         # Strict 7-day window: an item we can't date can't be verified as
         # within it, so — unlike a "best effort" feed — it gets dropped
@@ -914,6 +917,10 @@ def fetch_stock_news(symbol: str, per_source_max: int = 8, total_max: int = 25):
         low = it["title"].lower()
         if any(p in low for p in NEWS_TITLE_BLOCKLIST):
             continue
+        dedup_key = (re.sub(r"\s+", " ", low).strip(), it["link"])
+        if dedup_key in seen_keys:
+            continue
+        seen_keys.add(dedup_key)
         filtered.append(it)
 
     filtered.sort(key=lambda it: it["dt"], reverse=True)
@@ -966,17 +973,24 @@ def fetch_all_stock_news(symbols: list[str], per_symbol_max: int = 6, total_max:
     return merged[:total_max]
 
 
-def render_news_section(symbols: list[str]):
+def render_news_section(symbols: list[str], *, scope_key: str, scope_noun: str):
+    """Renders one news feed (selectbox + headline list) scoped to `symbols`.
+
+    scope_key   — unique suffix for widget keys, so the Open-positions and
+                  Closed-positions news pickers (rendered in separate tabs)
+                  don't collide in Streamlit's session state.
+    scope_noun  — used in empty-state / caption copy, e.g. "open positions".
+    """
     if not symbols:
-        st.caption("No positions to show news for yet.")
+        st.caption(f"No {scope_noun} to show news for yet.")
         return
     options = [ALL_STOCKS_OPTION] + symbols
-    picked = st.selectbox("Stock", options=options, key="_news_symbol")
+    picked = st.selectbox("Stock", options=options, key=f"_news_symbol_{scope_key}")
     if not picked:
         return
 
     show_all = picked == ALL_STOCKS_OPTION
-    with st.spinner(f"Fetching news for {'all your stocks' if show_all else picked}..."):
+    with st.spinner(f"Fetching news for {'all your ' + scope_noun if show_all else picked}..."):
         try:
             items = fetch_all_stock_news(symbols) if show_all else fetch_stock_news(picked)
         except Exception as exc:
@@ -984,7 +998,7 @@ def render_news_section(symbols: list[str]):
             return
 
     if not items:
-        scope = "your holdings" if show_all else f"\"{picked}\""
+        scope = f"your {scope_noun}" if show_all else f"\"{picked}\""
         st.caption(f"No headlines with {scope} in the title from the last "
                    f"{NEWS_MAX_AGE_DAYS} days across the tracked sources.")
         return
@@ -1008,7 +1022,7 @@ def render_news_section(symbols: list[str]):
             unsafe_allow_html=True,
         )
 
-    scope_text = f"across all {len(symbols)} of your held stocks" if show_all else f"with \"{picked}\" in the title"
+    scope_text = f"across all {len(symbols)} of your {scope_noun}" if show_all else f"with \"{picked}\" in the title"
     st.caption(f"Headlines {scope_text}, past {NEWS_MAX_AGE_DAYS} days, across NSE, BSE, "
                "Mint, Business Standard, Times of India, Economic Times, Moneycontrol, CNBC-TV18 and "
                "Reuters — excluding auto-generated price-update pages. Cached 30 min per stock.")
@@ -1559,10 +1573,17 @@ def render_live(engine: "LiveEngine"):
 
     with tab_news:
         st.markdown('<div class="section-label">News by stock</div>', unsafe_allow_html=True)
-        open_symbols = {t.get("symbol") for t in ticks if t.get("symbol")}
-        closed_symbols = {c.get("Symbol") for c in engine.closed_positions if c.get("Symbol")}
-        all_symbols = sorted(open_symbols | closed_symbols)
-        render_news_section(all_symbols)
+        open_symbols = sorted({t.get("symbol") for t in ticks if t.get("symbol")})
+        closed_symbols = sorted({c.get("Symbol") for c in engine.closed_positions if c.get("Symbol")})
+
+        news_tab_open, news_tab_closed = st.tabs([
+            f"📈 Open positions ({len(open_symbols)})",
+            f"✅ Closed positions ({len(closed_symbols)})",
+        ])
+        with news_tab_open:
+            render_news_section(open_symbols, scope_key="open", scope_noun="open positions")
+        with news_tab_closed:
+            render_news_section(closed_symbols, scope_key="closed", scope_noun="closed positions")
 
 
 # ── UI ──────────────────────────────────────────────────────────────────
