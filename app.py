@@ -481,6 +481,10 @@ def inject_theme():
             background: rgba(124,92,255,0.15); color: var(--accent-2);
             border: 1px solid rgba(124,92,255,0.4);
         }
+        .news-badge-stock {
+            background: var(--panel-2); color: var(--muted);
+            border: 1px solid var(--border); font-weight: 700;
+        }
         .news-meta {
             color: var(--muted); font-size: 0.74rem; margin-top: 4px;
         }
@@ -926,27 +930,65 @@ def fetch_stock_news(symbol: str, per_source_max: int = 8, total_max: int = 25):
         out.append({
             "title": it["title"], "source": it["source"], "link": it["link"],
             "published": it["dt"].strftime("%d %b %Y, %I:%M %p"), "recency": recency,
+            "dt": it["dt"],  # kept (not just the formatted string) so the "All
+                             # stocks" view can merge+re-sort across symbols
         })
     return out
+
+
+ALL_STOCKS_OPTION = "🌐 All my stocks"
+
+
+def fetch_all_stock_news(symbols: list[str], per_symbol_max: int = 6, total_max: int = 60):
+    """Merges fetch_stock_news across every symbol into one recency-sorted
+    feed, each item tagged with which stock it's about. Bounded to
+    per_symbol_max items per stock before merging, so one heavily-covered
+    stock can't crowd out everything else. Runs the per-symbol fetches
+    concurrently (each of which is itself already cached 30 min and
+    internally parallel across sources) capped to a modest worker count —
+    fetch_stock_news's own internal pool already opens up to 9 connections
+    per symbol, so fanning out too many symbols at once would multiply
+    that unnecessarily.
+    """
+    merged = []
+    with ThreadPoolExecutor(max_workers=min(6, max(1, len(symbols)))) as pool:
+        futures = {pool.submit(fetch_stock_news, sym): sym for sym in symbols}
+        for fut in as_completed(futures):
+            sym = futures[fut]
+            try:
+                items = fut.result()
+            except Exception:
+                continue  # one stock failing shouldn't sink the whole feed
+            for it in items[:per_symbol_max]:
+                merged.append({**it, "symbol": sym})
+
+    merged.sort(key=lambda it: it["dt"], reverse=True)
+    return merged[:total_max]
 
 
 def render_news_section(symbols: list[str]):
     if not symbols:
         st.caption("No positions to show news for yet.")
         return
-    picked = st.selectbox("Stock", options=symbols, key="_news_symbol")
+    options = [ALL_STOCKS_OPTION] + symbols
+    picked = st.selectbox("Stock", options=options, key="_news_symbol")
     if not picked:
         return
-    with st.spinner(f"Fetching news for {picked}..."):
+
+    show_all = picked == ALL_STOCKS_OPTION
+    with st.spinner(f"Fetching news for {'all your stocks' if show_all else picked}..."):
         try:
-            items = fetch_stock_news(picked)
+            items = fetch_all_stock_news(symbols) if show_all else fetch_stock_news(picked)
         except Exception as exc:
-            st.error(f"Couldn't fetch news for {picked}: {exc}")
+            st.error(f"Couldn't fetch news: {exc}")
             return
+
     if not items:
-        st.caption(f"No headlines with \"{picked}\" in the title from the last "
+        scope = "your holdings" if show_all else f"\"{picked}\""
+        st.caption(f"No headlines with {scope} in the title from the last "
                    f"{NEWS_MAX_AGE_DAYS} days across the tracked sources.")
         return
+
     RECENCY_BADGE = {
         "new": '<span class="news-badge news-badge-new">🟢 New</span>',
         "recent": '<span class="news-badge news-badge-recent">🕒 Recent</span>',
@@ -955,16 +997,19 @@ def render_news_section(symbols: list[str]):
     for it in items:
         meta = it["source"] + (" · " + it["published"] if it["published"] else "")
         badge = RECENCY_BADGE.get(it["recency"], "")
+        stock_badge = f'<span class="news-badge news-badge-stock">{it["symbol"]}</span>' if show_all else ""
         st.markdown(
             flat(f"""
             <div class="news-item news-{it['recency']}">
-                <a href="{it['link']}" target="_blank" rel="noopener noreferrer" class="news-title">{it['title']}</a>{badge}
+                <a href="{it['link']}" target="_blank" rel="noopener noreferrer" class="news-title">{it['title']}</a>{stock_badge}{badge}
                 <div class="news-meta">{meta}</div>
             </div>
             """),
             unsafe_allow_html=True,
         )
-    st.caption(f"Headlines with \"{picked}\" in the title, past {NEWS_MAX_AGE_DAYS} days, across NSE, BSE, "
+
+    scope_text = f"across all {len(symbols)} of your held stocks" if show_all else f"with \"{picked}\" in the title"
+    st.caption(f"Headlines {scope_text}, past {NEWS_MAX_AGE_DAYS} days, across NSE, BSE, "
                "Mint, Business Standard, Times of India, Economic Times, Moneycontrol, CNBC-TV18 and "
                "Reuters — excluding auto-generated price-update pages. Cached 30 min per stock.")
 
