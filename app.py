@@ -530,12 +530,47 @@ def hero_tiles(items):
     return flat(f'<div class="hero-tiles">{tiles}</div>')
 
 
+# ── Access log ─────────────────────────────────────────────────────────────
+# Shared across every visitor's session via st.cache_resource (a
+# session_state list would only be visible to that one visitor's own
+# browser tab). In-memory only: resets whenever the app restarts/redeploys,
+# same lifetime as get_engine's cache. Capped so it can't grow unbounded
+# over a long-running deployment.
+_ACCESS_LOG_MAX = 500
+
+
+@st.cache_resource
+def _access_log_store():
+    return {"lock": threading.Lock(), "entries": []}
+
+
+def _record_access(name):
+    store = _access_log_store()
+    with store["lock"]:
+        store["entries"].append({"name": name, "ts": datetime.now(IST)})
+        if len(store["entries"]) > _ACCESS_LOG_MAX:
+            del store["entries"][: len(store["entries"]) - _ACCESS_LOG_MAX]
+
+
+def _get_access_log():
+    store = _access_log_store()
+    with store["lock"]:
+        return list(store["entries"])
+
+
 # ── Password gate ─────────────────────────────────────────────────────────
 def check_password():
     def _submit():
-        st.session_state["_pw_ok"] = (
-            st.session_state.get("_pw_input", "") == st.secrets.get("APP_PASSWORD", "")
+        name = st.session_state.get("_pw_name", "").strip()
+        ok = (
+            bool(name)
+            and st.session_state.get("_pw_input", "") == st.secrets.get("APP_PASSWORD", "")
         )
+        st.session_state["_pw_ok"] = ok
+        if ok:
+            _record_access(name)
+        elif not name:
+            st.session_state["_pw_name_missing"] = True
 
     if st.session_state.get("_pw_ok"):
         return True
@@ -552,8 +587,11 @@ def check_password():
     )
     c1, c2, c3 = st.columns([1, 1, 1])
     with c2:
+        st.text_input("Your name", key="_pw_name")
         st.text_input("Password", type="password", key="_pw_input", on_change=_submit)
-        if "_pw_ok" in st.session_state and not st.session_state["_pw_ok"]:
+        if st.session_state.get("_pw_name_missing") and not st.session_state.get("_pw_ok"):
+            st.error("Please enter your name.")
+        elif "_pw_ok" in st.session_state and not st.session_state["_pw_ok"]:
             st.error("Incorrect password.")
     return False
 
@@ -1300,9 +1338,25 @@ def main():
         )
         st.divider()
         if st.button("🔄 Restart feed / refetch sheet", use_container_width=True):
-            st.cache_resource.clear()
+            get_engine.clear()  # only the engine cache — not the access log
             st.rerun()
         st.caption(f"Live tables refresh every {TICK_REFRESH_SECONDS}s, tick by tick.")
+
+        st.divider()
+        access_log = _get_access_log()
+        with st.expander(f"🔐 Access log ({len(access_log)})"):
+            if not access_log:
+                st.caption("No entries yet.")
+            else:
+                log_df = pd.DataFrame(
+                    [{"Name": e["name"], "Time": e["ts"].strftime("%d %b %Y, %I:%M:%S %p")}
+                     for e in reversed(access_log[-100:])]
+                )
+                st.dataframe(log_df, hide_index=True, use_container_width=True)
+                st.caption(
+                    f"Showing latest {min(100, len(access_log))} of {len(access_log)} (IST). "
+                    "In-memory only, resets on app restart/redeploy."
+                )
 
     if not script_url:
         st.info("Paste your Apps Script Web App URL in the sidebar to start the live feed.")
