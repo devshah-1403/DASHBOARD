@@ -39,7 +39,9 @@ import os
 import re
 import threading
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime
+from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
 import altair as alt
@@ -449,6 +451,19 @@ def inject_theme():
         }
         .hero-tile-value.positive { color: var(--pos); }
         .hero-tile-value.negative { color: var(--neg); }
+
+        .news-item {
+            padding: 12px 0; border-bottom: 1px solid var(--border);
+        }
+        .news-item:last-child { border-bottom: none; }
+        .news-title {
+            color: var(--text); font-weight: 600; font-size: 0.92rem;
+            text-decoration: none; line-height: 1.4;
+        }
+        .news-title:hover { color: var(--accent, #4da3ff); text-decoration: underline; }
+        .news-meta {
+            color: var(--muted); font-size: 0.74rem; margin-top: 4px;
+        }
         </style>
         <style>
         /* Thin, unobtrusive scrollbar for .hero-tiles when it does need to scroll. */
@@ -758,7 +773,98 @@ def get_engine(apps_script_url: str, sheet_name: str | None):
     return LiveEngine(rows)
 
 
-# ── Formatting helpers ─────────────────────────────────────────────────────
+# ── News ─────────────────────────────────────────────────────────────────
+# No single free API covers NSE + BSE + Mint + Business Standard + Times of
+# India + more with one key, so instead this queries Google News' public RSS
+# search (no key/auth needed) and restricts it to those publishers via
+# site: filters. Google News indexes their full archives, not just today,
+# so this also surfaces older ("past") coverage for a symbol, not only
+# breaking news — closer to what was actually asked for than a live-only
+# feed would be.
+NEWS_SOURCES = {
+    "NSE": "nseindia.com",
+    "BSE": "bseindia.com",
+    "Mint": "livemint.com",
+    "Business Standard": "business-standard.com",
+    "Times of India": "timesofindia.indiatimes.com",
+    "Economic Times": "economictimes.indiatimes.com",
+    "Moneycontrol": "moneycontrol.com",
+    "CNBC-TV18": "cnbctv18.com",
+    "Reuters": "reuters.com",
+}
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_stock_news(symbol: str, max_items: int = 12):
+    """Latest + past coverage for one symbol, across NEWS_SOURCES, via
+    Google News RSS. Returns a list of {title, source, link, published}
+    dicts, newest first. Cached 30 min per symbol so switching tabs or the
+    live-tick refresh loop doesn't re-hit Google News on every rerun.
+    """
+    site_filter = " OR ".join(f"site:{d}" for d in NEWS_SOURCES.values())
+    query = f'{symbol} stock ({site_filter})'
+    url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-IN&gl=IN&ceid=IN:en"
+
+    resp = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+    resp.raise_for_status()
+    root = ET.fromstring(resp.content)
+
+    items = []
+    for item in root.findall(".//item")[:max_items]:
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        pub_date = (item.findtext("pubDate") or "").strip()
+        source_el = item.find("source")
+        source = source_el.text.strip() if source_el is not None and source_el.text else ""
+        # Google News titles are formatted "Headline - Source". Strip that
+        # trailing " - Source" for a clean headline regardless of whether
+        # <source> was present (normal case) or we have to fall back to
+        # splitting the title itself (source tag missing).
+        if source and title.endswith(f" - {source}"):
+            title = title[: -(len(source) + 3)].strip()
+        elif not source and " - " in title:
+            title, source = title.rsplit(" - ", 1)
+        try:
+            dt = datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %Z")
+            published = dt.strftime("%d %b %Y, %I:%M %p")
+        except ValueError:
+            published = pub_date
+        items.append({"title": title, "source": source, "link": link, "published": published})
+    return items
+
+
+def render_news_section(symbols: list[str]):
+    if not symbols:
+        st.caption("No positions to show news for yet.")
+        return
+    picked = st.selectbox("Stock", options=symbols, key="_news_symbol")
+    if not picked:
+        return
+    try:
+        items = fetch_stock_news(picked)
+    except requests.RequestException as exc:
+        st.error(f"Couldn't fetch news for {picked}: {exc}")
+        return
+    if not items:
+        st.caption(f"No recent coverage found for {picked} across the tracked sources.")
+        return
+    for it in items:
+        meta = it["source"] + (" · " + it["published"] if it["published"] else "")
+        st.markdown(
+            flat(f"""
+            <div class="news-item">
+                <a href="{it['link']}" target="_blank" rel="noopener noreferrer" class="news-title">{it['title']}</a>
+                <div class="news-meta">{meta}</div>
+            </div>
+            """),
+            unsafe_allow_html=True,
+        )
+    st.caption("Sourced via Google News across NSE, BSE, Mint, Business Standard, "
+               "Times of India, Economic Times, Moneycontrol, CNBC-TV18 and Reuters. "
+               "Cached 30 min per stock.")
+
+
+
 def fmt_money(x):
     if x is None:
         return "-"
@@ -959,7 +1065,7 @@ def render_live(engine: "LiveEngine"):
         unsafe_allow_html=True,
     )
 
-    tab_open, tab_closed = st.tabs(["📈 Open positions", "✅ Closed positions"])
+    tab_open, tab_closed, tab_news = st.tabs(["📈 Open positions", "✅ Closed positions", "📰 News"])
 
     with tab_open:
         open_segments = [("Equity", equity), ("F&O", fo)]
@@ -1300,6 +1406,13 @@ def render_live(engine: "LiveEngine"):
                         tooltip=[alt.Tooltip("Outcome:N"), alt.Tooltip("Count:Q")],
                     ).properties(height=220)
                     st.altair_chart(alt_dark(donut), use_container_width=True)
+
+    with tab_news:
+        st.markdown('<div class="section-label">News by stock</div>', unsafe_allow_html=True)
+        open_symbols = {t.get("symbol") for t in ticks if t.get("symbol")}
+        closed_symbols = {c.get("Symbol") for c in engine.closed_positions if c.get("Symbol")}
+        all_symbols = sorted(open_symbols | closed_symbols)
+        render_news_section(all_symbols)
 
 
 # ── UI ──────────────────────────────────────────────────────────────────
