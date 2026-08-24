@@ -41,7 +41,7 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
@@ -454,14 +454,33 @@ def inject_theme():
         .hero-tile-value.negative { color: var(--neg); }
 
         .news-item {
-            padding: 12px 0; border-bottom: 1px solid var(--border);
+            padding: 12px 10px 12px 12px; border-bottom: 1px solid var(--border);
+            border-left: 3px solid transparent; transition: background 0.15s;
         }
         .news-item:last-child { border-bottom: none; }
+        /* Most recent (<24h) gets the strongest highlight, "recent" (1-3
+           days) a subtler one, and 3-7 days old is left plain — reusing
+           the app's existing accent/accent-2 colors rather than a new hue. */
+        .news-item.news-new { border-left-color: var(--accent); background: rgba(52,213,200,0.07); }
+        .news-item.news-recent { border-left-color: var(--accent-2); background: rgba(124,92,255,0.05); }
         .news-title {
             color: var(--text); font-weight: 600; font-size: 0.92rem;
             text-decoration: none; line-height: 1.4;
         }
         .news-title:hover { color: var(--accent, #4da3ff); text-decoration: underline; }
+        .news-badge {
+            display: inline-block; font-size: 0.58rem; font-weight: 800;
+            letter-spacing: 0.04em; text-transform: uppercase; margin-left: 8px;
+            padding: 1px 7px; border-radius: 999px; vertical-align: middle; white-space: nowrap;
+        }
+        .news-badge-new {
+            background: rgba(52,213,200,0.15); color: var(--accent);
+            border: 1px solid rgba(52,213,200,0.4);
+        }
+        .news-badge-recent {
+            background: rgba(124,92,255,0.15); color: var(--accent-2);
+            border: 1px solid rgba(124,92,255,0.4);
+        }
         .news-meta {
             color: var(--muted); font-size: 0.74rem; margin-top: 4px;
         }
@@ -801,6 +820,17 @@ NEWS_SOURCES = {
     "Reuters": "reuters.com",
 }
 
+# Several outlets (Economic Times especially) auto-publish a templated
+# "<Stock> Share Price Today, <Stock> Stock Price Live NSE/BSE Updates"
+# page per stock, regenerated daily — not an actual news story. Filtered
+# both in the query itself (-intitle: exclusions) and again client-side as
+# a safety net, since Google doesn't reliably honor every negative filter.
+NEWS_TITLE_BLOCKLIST = (
+    "share price today", "stock price live", "share price live",
+    "nse/bse updates", "share price nse", "stock price nse",
+)
+NEWS_MAX_AGE_DAYS = 7
+
 
 def _parse_news_rss(xml_bytes):
     root = ET.fromstring(xml_bytes)
@@ -820,6 +850,10 @@ def _parse_news_rss(xml_bytes):
         elif not source and " - " in title:
             title, source = title.rsplit(" - ", 1)
         try:
+            # Google always sends this in GMT; strptime's %Z doesn't attach
+            # real tzinfo, so dt comes back naive but is UTC-equivalent —
+            # fine as long as we compare it against another naive UTC value
+            # (see the utcnow() cutoff below), never against IST/aware time.
             dt = datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %Z")
         except ValueError:
             dt = None
@@ -829,9 +863,11 @@ def _parse_news_rss(xml_bytes):
 
 def _fetch_one_source(symbol, domain, max_items):
     # intitle: forces the ticker to literally appear in the headline —
-    # this is what actually keeps results on-topic, far more than any
-    # amount of extra keywords in the query body would.
-    query = f'intitle:"{symbol}" site:{domain}'
+    # this is what actually keeps results on-topic. The -intitle: terms
+    # knock out the auto-generated "Share Price Today" template pages at
+    # the source, before they even count against max_items.
+    exclusions = " ".join(f'-intitle:"{p}"' for p in ("Share Price Today", "Stock Price Live"))
+    query = f'intitle:"{symbol}" {exclusions} site:{domain}'
     url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-IN&gl=IN&ceid=IN:en"
     resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
     resp.raise_for_status()
@@ -839,12 +875,16 @@ def _fetch_one_source(symbol, domain, max_items):
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def fetch_stock_news(symbol: str, per_source_max: int = 6, total_max: int = 25):
-    """Latest + past coverage for one symbol, queried separately per source
-    in NEWS_SOURCES (see module note above for why), merged and sorted
-    newest-first. Cached 30 min per symbol so switching tabs or the
-    live-tick refresh loop doesn't re-hit Google News on every rerun.
-    Returns a list of {title, source, link, published} dicts.
+def fetch_stock_news(symbol: str, per_source_max: int = 8, total_max: int = 25):
+    """Latest coverage for one symbol from the past NEWS_MAX_AGE_DAYS days
+    only, queried separately per source in NEWS_SOURCES (see module note
+    above for why), merged and sorted newest-first. Cached 30 min per
+    symbol so switching tabs or the live-tick refresh loop doesn't re-hit
+    Google News on every rerun. Returns a list of
+    {title, source, link, published, recency} dicts — recency is one of
+    "new" (<24h old), "recent" (1-3 days), or "week" (3-7 days), computed
+    at fetch time; since the cache TTL is 30 min, a bucket can drift stale
+    by at most that much, which isn't visible at day-scale bucket sizes.
     """
     merged = []
     with ThreadPoolExecutor(max_workers=len(NEWS_SOURCES)) as pool:
@@ -858,14 +898,35 @@ def fetch_stock_news(symbol: str, per_source_max: int = 6, total_max: int = 25):
             except requests.RequestException:
                 continue  # one source failing shouldn't sink the whole fetch
 
-    # Newest first; items with an unparseable date sort to the end rather
-    # than crashing the sort or clumping at the top.
-    merged.sort(key=lambda it: it["dt"] or datetime.min, reverse=True)
+    now = datetime.utcnow()
+    cutoff = now - timedelta(days=NEWS_MAX_AGE_DAYS)
+    filtered = []
+    for it in merged:
+        # Strict 7-day window: an item we can't date can't be verified as
+        # within it, so — unlike a "best effort" feed — it gets dropped
+        # rather than kept.
+        if it["dt"] is None or it["dt"] < cutoff:
+            continue
+        low = it["title"].lower()
+        if any(p in low for p in NEWS_TITLE_BLOCKLIST):
+            continue
+        filtered.append(it)
+
+    filtered.sort(key=lambda it: it["dt"], reverse=True)
 
     out = []
-    for it in merged[:total_max]:
-        published = it["dt"].strftime("%d %b %Y, %I:%M %p") if it["dt"] else it["pub_date_raw"]
-        out.append({"title": it["title"], "source": it["source"], "link": it["link"], "published": published})
+    for it in filtered[:total_max]:
+        age = now - it["dt"]
+        if age <= timedelta(hours=24):
+            recency = "new"
+        elif age <= timedelta(days=3):
+            recency = "recent"
+        else:
+            recency = "week"
+        out.append({
+            "title": it["title"], "source": it["source"], "link": it["link"],
+            "published": it["dt"].strftime("%d %b %Y, %I:%M %p"), "recency": recency,
+        })
     return out
 
 
@@ -883,22 +944,29 @@ def render_news_section(symbols: list[str]):
             st.error(f"Couldn't fetch news for {picked}: {exc}")
             return
     if not items:
-        st.caption(f"No headlines found with \"{picked}\" in the title across the tracked sources.")
+        st.caption(f"No headlines with \"{picked}\" in the title from the last "
+                   f"{NEWS_MAX_AGE_DAYS} days across the tracked sources.")
         return
+    RECENCY_BADGE = {
+        "new": '<span class="news-badge news-badge-new">🟢 New</span>',
+        "recent": '<span class="news-badge news-badge-recent">🕒 Recent</span>',
+        "week": "",
+    }
     for it in items:
         meta = it["source"] + (" · " + it["published"] if it["published"] else "")
+        badge = RECENCY_BADGE.get(it["recency"], "")
         st.markdown(
             flat(f"""
-            <div class="news-item">
-                <a href="{it['link']}" target="_blank" rel="noopener noreferrer" class="news-title">{it['title']}</a>
+            <div class="news-item news-{it['recency']}">
+                <a href="{it['link']}" target="_blank" rel="noopener noreferrer" class="news-title">{it['title']}</a>{badge}
                 <div class="news-meta">{meta}</div>
             </div>
             """),
             unsafe_allow_html=True,
         )
-    st.caption(f"Headlines with \"{picked}\" in the title, across NSE, BSE, Mint, Business Standard, "
-               "Times of India, Economic Times, Moneycontrol, CNBC-TV18 and Reuters. "
-               "Cached 30 min per stock.")
+    st.caption(f"Headlines with \"{picked}\" in the title, past {NEWS_MAX_AGE_DAYS} days, across NSE, BSE, "
+               "Mint, Business Standard, Times of India, Economic Times, Moneycontrol, CNBC-TV18 and "
+               "Reuters — excluding auto-generated price-update pages. Cached 30 min per stock.")
 
 
 
