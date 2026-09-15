@@ -597,21 +597,57 @@ def _get_access_log():
         return list(store["entries"])
 
 
-# ── Password gate ─────────────────────────────────────────────────────────
-def check_password():
-    def _submit():
-        name = st.session_state.get("_pw_name", "").strip()
-        ok = (
-            bool(name)
-            and st.session_state.get("_pw_input", "") == st.secrets.get("APP_PASSWORD", "")
-        )
-        st.session_state["_pw_ok"] = ok
-        if ok:
-            _record_access(name)
-        elif not name:
-            st.session_state["_pw_name_missing"] = True
+# ── Client-wise login ─────────────────────────────────────────────────────
+#
+# Secrets format (set in Streamlit Cloud → Secrets):
+#
+# [clients.ROHITH]
+# password       = "secret123"
+# display_name   = "Rohith Sir"
+# apps_script_url = "https://script.google.com/macros/s/ABC.../exec"
+# sheet_name     = "Rohith"          # optional — sheet tab name
+#
+# [clients.PRIYA]
+# password       = "priya456"
+# display_name   = "Priya"
+# apps_script_url = "https://script.google.com/macros/s/XYZ.../exec"
+# sheet_name     = "Priya"
+#
+# Optionally, one admin client sees ALL positions concatenated:
+# [clients.ADMIN]
+# password        = "adminpass"
+# display_name    = "Admin"
+# is_admin        = true              # sees all clients' data merged
+# apps_script_url = "..."
+#
+# Falls back to the old flat APP_PASSWORD / APPS_SCRIPT_URL secrets if no
+# [clients] table is defined (backward-compatible).
 
-    if st.session_state.get("_pw_ok"):
+def _get_clients():
+    """Return dict of client_id -> config dict from st.secrets."""
+    try:
+        raw = st.secrets.get("clients", {})
+        if not raw:
+            # Backward-compat: single shared password
+            return {
+                "DEFAULT": {
+                    "password":        st.secrets.get("APP_PASSWORD", ""),
+                    "display_name":    "User",
+                    "apps_script_url": st.secrets.get("APPS_SCRIPT_URL", ""),
+                    "sheet_name":      st.secrets.get("APPS_SCRIPT_SHEET_NAME", ""),
+                    "is_admin":        False,
+                }
+            }
+        return {k.upper(): dict(v) for k, v in raw.items()}
+    except Exception:
+        return {}
+
+
+def check_password():
+    """Show login form. On success stores client config in session_state.
+    Returns True only when a valid client is logged in."""
+
+    if st.session_state.get("_client_ok"):
         return True
 
     inject_theme()
@@ -624,15 +660,56 @@ def check_password():
         """),
         unsafe_allow_html=True,
     )
-    c1, c2, c3 = st.columns([1, 1, 1])
+
+    clients = _get_clients()
+
+    def _submit():
+        cid   = st.session_state.get("_login_id", "").strip().upper()
+        pw    = st.session_state.get("_login_pw", "")
+        cfg   = clients.get(cid)
+        if cfg and pw == cfg.get("password", ""):
+            st.session_state["_client_ok"]     = True
+            st.session_state["_client_id"]     = cid
+            st.session_state["_client_cfg"]    = cfg
+            st.session_state["_client_name"]   = cfg.get("display_name", cid)
+            _record_access(cfg.get("display_name", cid))
+        else:
+            st.session_state["_client_ok"]    = False
+            st.session_state["_login_failed"] = True
+
+    c1, c2, c3 = st.columns([1, 1.1, 1])
     with c2:
-        st.text_input("Your name", key="_pw_name")
-        st.text_input("Password", type="password", key="_pw_input", on_change=_submit)
-        if st.session_state.get("_pw_name_missing") and not st.session_state.get("_pw_ok"):
-            st.error("Please enter your name.")
-        elif "_pw_ok" in st.session_state and not st.session_state["_pw_ok"]:
-            st.error("Incorrect password.")
+        with st.container(border=True):
+            st.markdown(
+                "<p style='text-align:center;color:var(--muted);font-size:.85rem;"
+                "margin-bottom:18px;'>Sign in to view your portfolio</p>",
+                unsafe_allow_html=True,
+            )
+            st.text_input("Client ID", key="_login_id",
+                          placeholder="e.g. ROHITH",
+                          help="Your unique client code — ask your broker for this.")
+            st.text_input("Password", type="password", key="_login_pw",
+                          on_change=_submit,
+                          placeholder="Enter your password")
+            st.button("Sign in →", on_click=_submit, use_container_width=True, type="primary")
+
+            if st.session_state.get("_login_failed") and not st.session_state.get("_client_ok"):
+                st.error("Invalid Client ID or password.")
+
     return False
+
+
+def current_client_cfg() -> dict:
+    """Return the logged-in client's config dict."""
+    return st.session_state.get("_client_cfg", {})
+
+
+def current_client_name() -> str:
+    return st.session_state.get("_client_name", "")
+
+
+def is_admin() -> bool:
+    return current_client_cfg().get("is_admin", False)
 
 
 # ── Background engine: login + FIFO build + token resolve + live WS feed ──
@@ -1610,36 +1687,75 @@ def main():
 
     inject_theme()
 
+    client_name_disp = current_client_name()
     st.markdown(
-        flat("""
+        flat(f"""
         <div class="db-header">
             <div class="db-title">
                 <div class="db-icon">📊</div>
                 <h1>Booked Profit Dashboard</h1>
+            </div>
+            <div style="font-size:.82rem;color:var(--muted);">
+                Portfolio of &nbsp;<strong style="color:var(--text);">{client_name_disp}</strong>
             </div>
         </div>
         """),
         unsafe_allow_html=True,
     )
 
+    cfg        = current_client_cfg()
+    client_name = current_client_name()
+    script_url  = cfg.get("apps_script_url", "")
+    sheet_tab   = cfg.get("sheet_name", "") or ""
+
     with st.sidebar:
-        st.markdown("### Trade ledger")
-        default_url = st.secrets.get("APPS_SCRIPT_URL", "")
-        script_url = st.text_input(
-            "Apps Script Web App URL",
-            value=default_url,
-            placeholder="https://script.google.com/macros/s/AKfycb.../exec",
-            help="Deploy Code.gs in your Sheet as a Web App (Execute as: Me, "
-                 "Access: Anyone with the link) and paste the /exec URL here.",
+        # ── Client badge ────────────────────────────────────────
+        st.markdown(
+            flat(f"""
+            <div style="background:var(--panel-2);border:1px solid var(--border);
+                        border-radius:12px;padding:12px 14px;margin-bottom:14px;">
+              <div style="font-size:.68rem;font-weight:700;text-transform:uppercase;
+                          letter-spacing:.06em;color:var(--muted);margin-bottom:4px;">
+                Logged in as
+              </div>
+              <div style="font-size:1rem;font-weight:700;color:var(--text);">
+                {client_name}
+              </div>
+              <div style="font-size:.72rem;color:var(--muted);margin-top:2px;">
+                ID: {st.session_state.get("_client_id","?")}
+                {"&nbsp;&nbsp;🔑 Admin" if is_admin() else ""}
+              </div>
+            </div>
+            """),
+            unsafe_allow_html=True,
         )
-        sheet_tab = st.text_input(
-            "Tab name (optional)",
-            value=st.secrets.get("APPS_SCRIPT_SHEET_NAME", ""),
-            placeholder="leave blank to use the first tab",
-        )
+
+        if st.button("🚪 Sign out", use_container_width=True):
+            for k in ["_client_ok","_client_id","_client_cfg","_client_name","_login_failed"]:
+                st.session_state.pop(k, None)
+            get_engine.clear()
+            st.rerun()
+
         st.divider()
+
+        # Admin: let them pick a different client to view
+        if is_admin():
+            clients = _get_clients()
+            non_admin = {k: v for k, v in clients.items() if not v.get("is_admin")}
+            if non_admin:
+                chosen = st.selectbox(
+                    "View client",
+                    options=["(All merged)"] + list(non_admin.keys()),
+                    format_func=lambda k: k if k == "(All merged)"
+                                          else non_admin[k].get("display_name", k),
+                    key="_admin_client_view",
+                )
+                if chosen != "(All merged)":
+                    script_url = non_admin[chosen].get("apps_script_url", script_url)
+                    sheet_tab  = non_admin[chosen].get("sheet_name", "") or ""
+
         if st.button("🔄 Restart feed / refetch sheet", use_container_width=True):
-            get_engine.clear()  # only the engine cache — not the access log
+            get_engine.clear()
             st.rerun()
         st.caption(f"Live tables refresh every {TICK_REFRESH_SECONDS}s, tick by tick.")
 
@@ -1660,7 +1776,10 @@ def main():
                 )
 
     if not script_url:
-        st.info("Paste your Apps Script Web App URL in the sidebar to start the live feed.")
+        st.warning(
+            f"No Apps Script URL configured for client **{client_name}**. "
+            "Ask your administrator to add it to the app secrets."
+        )
         return
 
     engine = get_engine(script_url, sheet_tab or None)
