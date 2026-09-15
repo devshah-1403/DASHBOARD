@@ -392,6 +392,69 @@ def inject_theme():
             color: #05070d; white-space: nowrap; flex-shrink: 0;
         }
 
+        /* Mobile reflow — desktop grid (above) is untouched. Below 640px the
+           8-col (open) / 7-col (closed) grid no longer fits, so instead of
+           forcing a horizontal scroll we restack each row into a compact
+           2-column card: symbol on top, then labelled qty/avg/cmp pairs,
+           then the P&L full-width at the bottom since that's the number
+           that actually matters at a glance on a phone. */
+        @media (max-width: 640px) {
+            .pos-table-wrap { overflow-x: visible; }
+            .pos-table { min-width: 0; }
+            .pos-table-head.cols-open, .pos-table-head.cols-closed { display: none; }
+
+            .pos-table-row.cols-open {
+                grid-template-columns: 1fr 1fr;
+                grid-template-areas:
+                    "sym   sym"
+                    "exch  tick"
+                    "qty   avg"
+                    "cmp   day"
+                    "mtm   mtm";
+                row-gap: 6px;
+                column-gap: 10px;
+                padding: 14px 10px;
+            }
+            .pos-table-row.cols-open > div:nth-child(1) { grid-area: sym; }
+            .pos-table-row.cols-open > div:nth-child(2) { grid-area: exch; }
+            .pos-table-row.cols-open > div:nth-child(3) { grid-area: qty; }
+            .pos-table-row.cols-open > div:nth-child(4) { grid-area: avg; }
+            .pos-table-row.cols-open > div:nth-child(5) { grid-area: cmp; }
+            .pos-table-row.cols-open > div:nth-child(6) { grid-area: day; text-align: right; }
+            .pos-table-row.cols-open > div:nth-child(7) {
+                grid-area: mtm; text-align: right; font-size: 1rem; margin-top: 2px;
+            }
+            .pos-table-row.cols-open > div:nth-child(8) { grid-area: tick; text-align: right; }
+            .pos-table-row.cols-open > div:nth-child(3)::before { content: "Qty "; color: var(--muted); font-weight: 500; }
+            .pos-table-row.cols-open > div:nth-child(4)::before { content: "Avg "; color: var(--muted); font-weight: 500; }
+            .pos-table-row.cols-open > div:nth-child(5)::before { content: "CMP "; color: var(--muted); font-weight: 500; }
+
+            .pos-table-row.cols-closed {
+                grid-template-columns: 1fr 1fr;
+                grid-template-areas:
+                    "sym   sym"
+                    "exch  date"
+                    "qty   buy"
+                    "sell  sell"
+                    "pnl   pnl";
+                row-gap: 6px;
+                column-gap: 10px;
+                padding: 14px 10px;
+            }
+            .pos-table-row.cols-closed > div:nth-child(1) { grid-area: sym; }
+            .pos-table-row.cols-closed > div:nth-child(2) { grid-area: exch; }
+            .pos-table-row.cols-closed > div:nth-child(3) { grid-area: qty; }
+            .pos-table-row.cols-closed > div:nth-child(4) { grid-area: buy; }
+            .pos-table-row.cols-closed > div:nth-child(5) { grid-area: sell; }
+            .pos-table-row.cols-closed > div:nth-child(6) { grid-area: date; text-align: right; }
+            .pos-table-row.cols-closed > div:nth-child(7) {
+                grid-area: pnl; text-align: right; font-size: 1rem; margin-top: 2px;
+            }
+            .pos-table-row.cols-closed > div:nth-child(3)::before { content: "Qty "; color: var(--muted); font-weight: 500; }
+            .pos-table-row.cols-closed > div:nth-child(4)::before { content: "Buy "; color: var(--muted); font-weight: 500; }
+            .pos-table-row.cols-closed > div:nth-child(5)::before { content: "Sell "; color: var(--muted); font-weight: 500; }
+        }
+
         /* Chart cards: st.markdown('<div class="chart-card">') + st.altair_chart(...) +
            st.markdown('</div>') used to be 3 SEPARATE calls — Streamlit renders each call
            as its own DOM node, so that div opened and closed empty and the real chart sat
