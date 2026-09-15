@@ -624,8 +624,11 @@ def _get_access_log():
 # [clients] table is defined (backward-compatible).
 
 def _get_clients():
-    """Return dict of client_id -> config dict from st.secrets."""
+    """Return dict of client_id -> config dict from st.secrets.
+    apps_script_url falls back to the shared APPS_SCRIPT_URL secret
+    if not set per-client — so one URL can serve all clients."""
     try:
+        shared_url = st.secrets.get("APPS_SCRIPT_URL", "")
         raw = st.secrets.get("clients", {})
         if not raw:
             # Backward-compat: single shared password
@@ -633,12 +636,19 @@ def _get_clients():
                 "DEFAULT": {
                     "password":        st.secrets.get("APP_PASSWORD", ""),
                     "display_name":    "User",
-                    "apps_script_url": st.secrets.get("APPS_SCRIPT_URL", ""),
+                    "apps_script_url": shared_url,
                     "sheet_name":      st.secrets.get("APPS_SCRIPT_SHEET_NAME", ""),
                     "is_admin":        False,
                 }
             }
-        return {k.upper(): dict(v) for k, v in raw.items()}
+        clients = {}
+        for k, v in raw.items():
+            cfg = dict(v)
+            # If no per-client URL, use the shared one
+            if not cfg.get("apps_script_url"):
+                cfg["apps_script_url"] = shared_url
+            clients[k.upper()] = cfg
+        return clients
     except Exception:
         return {}
 
