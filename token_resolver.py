@@ -146,7 +146,18 @@ def resolve_row(master_by_name, row):
     filtered = [c for c in candidates if _norm(c.get("exch_seg")) == lookup_seg]
 
     if instrument_type == "EQ" or (not instrument_type and not is_generic_fo):
-        filtered = [c for c in filtered if _norm(c.get("instrumenttype")) in ("", "EQ")]
+        # instrumenttype alone isn't enough to isolate the equity row: a
+        # company's listed NCDs/bonds share the same 'name' and exch_seg
+        # ('NSE') as the stock, and often carry the same blank/'EQ'
+        # instrumenttype too — so without a symbol check they slip through
+        # here and can get picked as the "equity" (e.g. a bond trading near
+        # its ₹1,00,000 face value getting resolved instead of the stock).
+        # Angel One's own equity symbol convention is always 'SYMBOL-EQ'.
+        filtered = [
+            c for c in filtered
+            if _norm(c.get("instrumenttype")) in ("", "EQ")
+            and _norm(c.get("symbol")).endswith("-EQ")
+        ]
     elif is_fut:
         filtered = [c for c in filtered if _norm(c.get("instrumenttype")).startswith("FUT")]
         if expiry:
