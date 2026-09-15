@@ -65,12 +65,27 @@ def _fetch_ledger_records(apps_script_url: str, sheet_name: str | None = None):
     for the doGet handler this talks to.
     """
     params = {"sheet": sheet_name} if sheet_name else None
-    resp = requests.get(apps_script_url, params=params, timeout=20)
-    resp.raise_for_status()
-    data = resp.json()
-    if isinstance(data, dict) and "error" in data:
-        raise ValueError(f"Apps Script error: {data['error']}")
-    return data
+
+    last_err = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(apps_script_url, params=params, timeout=45)
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, dict) and "error" in data:
+                raise ValueError(f"Apps Script error: {data['error']}")
+            return data
+        except requests.exceptions.ReadTimeout as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))  # 2s, then 4s backoff
+                continue
+            raise TimeoutError(
+                "The ledger service (Google Apps Script) didn't respond in time "
+                "after 3 attempts. It may be cold-starting or the sheet is large — "
+                "please try refreshing in a moment."
+            ) from e
+    raise last_err
 
 st.set_page_config(
     page_title="Booked Profit Dashboard",
@@ -624,11 +639,8 @@ def _get_access_log():
 # [clients] table is defined (backward-compatible).
 
 def _get_clients():
-    """Return dict of client_id -> config dict from st.secrets.
-    apps_script_url falls back to the shared APPS_SCRIPT_URL secret
-    if not set per-client — so one URL can serve all clients."""
+    """Return dict of client_id -> config dict from st.secrets."""
     try:
-        shared_url = st.secrets.get("APPS_SCRIPT_URL", "")
         raw = st.secrets.get("clients", {})
         if not raw:
             # Backward-compat: single shared password
@@ -636,19 +648,12 @@ def _get_clients():
                 "DEFAULT": {
                     "password":        st.secrets.get("APP_PASSWORD", ""),
                     "display_name":    "User",
-                    "apps_script_url": shared_url,
+                    "apps_script_url": st.secrets.get("APPS_SCRIPT_URL", ""),
                     "sheet_name":      st.secrets.get("APPS_SCRIPT_SHEET_NAME", ""),
                     "is_admin":        False,
                 }
             }
-        clients = {}
-        for k, v in raw.items():
-            cfg = dict(v)
-            # If no per-client URL, use the shared one
-            if not cfg.get("apps_script_url"):
-                cfg["apps_script_url"] = shared_url
-            clients[k.upper()] = cfg
-        return clients
+        return {k.upper(): dict(v) for k, v in raw.items()}
     except Exception:
         return {}
 
