@@ -653,7 +653,15 @@ def _get_clients():
                     "is_admin":        False,
                 }
             }
-        return {k.upper(): dict(v) for k, v in raw.items()}
+        default_url = st.secrets.get("APPS_SCRIPT_URL", "")
+        clients = {}
+        for k, v in raw.items():
+            cfg = dict(v)
+            cfg.setdefault("apps_script_url", default_url)
+            if not cfg.get("apps_script_url"):
+                cfg["apps_script_url"] = default_url
+            clients[k.upper()] = cfg
+        return clients
     except Exception:
         return {}
 
