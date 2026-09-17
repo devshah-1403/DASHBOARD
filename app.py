@@ -1403,6 +1403,55 @@ def underlying_symbol(symbol: str) -> str:
     return m.group(1) if m else symbol
 
 
+def _parse_num(val):
+    """Best-effort float parse for values coming out of a Google Sheet cell
+    (may already be a number, or a comma-formatted string like '2,040')."""
+    if val is None or val == "":
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    try:
+        return float(str(val).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def contract_display(r: dict) -> str:
+    """Human label for an F&O contract: underlying + strike + CE/PE (e.g.
+    'BANKNIFTY 56000 CE'), or underlying + FUT — instead of just the bare
+    underlying name. The ledger clearly tracks strike/option-type as
+    separate columns (see the client's trade sheet), so this tries the
+    likely field names a resolved position dict might carry them under;
+    if none of them are actually populated at this point in the pipeline
+    (positions_builder.py / token_resolver.py decide that, not this file),
+    it falls back to whatever `symbol` already is.
+    """
+    symbol = str(r.get("symbol") or "-").strip()
+    # Already a full Angel One-style trading symbol (e.g. "BANKNIFTY25SEP2666000CE")?
+    if _FNO_SUFFIX_RE.match(symbol.upper()):
+        return symbol
+
+    stock = underlying_symbol(symbol) or symbol
+    strike = (
+        r.get("strike") or r.get("Strike") or r.get("strikePrice")
+        or r.get("StrikePrice") or r.get("strike_price")
+    )
+    opt_raw = (
+        r.get("optionType") or r.get("optiontype") or r.get("OptionType")
+        or r.get("Option Type") or r.get("right") or r.get("Right")
+        or r.get("CE/PE") or r.get("ce_pe") or r.get("instrumentType")
+    )
+    opt = str(opt_raw).strip().upper() if opt_raw else ""
+
+    if opt in ("CE", "PE") and strike not in (None, ""):
+        strike_num = _parse_num(strike)
+        strike_txt = fmt_qty(strike_num) if strike_num is not None else str(strike)
+        return f"{stock} {strike_txt} {opt}"
+    if opt in ("FUT", "FUTURE", "FUTURES") or "FUT" in symbol.upper():
+        return f"{stock} FUT"
+    return stock
+
+
 def rollover_badge_html(symbol: str, rollovers: dict) -> str:
     """A small '🔄 Rolled' pill for a symbol's row (open positions, live
     table) when its underlying stock has rollover history — so anyone
@@ -1682,14 +1731,18 @@ def render_live(engine: "LiveEngine"):
                 rolled_rows = [r for r in rows if engine.rollovers.get(underlying_symbol(r.get("symbol", "")))]
                 if rolled_rows:
                     # Group by underlying stock first — engine.rollovers holds
-                    # ONE roll chain per underlying (e.g. "BANKNIFTY"), not one
-                    # per contract. Looping over rolled_rows directly re-prints
-                    # that same chain once for every open contract on that
-                    # underlying (every strike/expiry you're holding), which is
-                    # why the same table appeared repeated several times.
-                    # Grouping here means the chain is rendered exactly once
-                    # per underlying, with all of that underlying's open
-                    # contracts listed above it.
+                    # ALL roll-chain rows for an underlying (e.g. "BANKNIFTY")
+                    # merged into one bucket, because the sheet's block header
+                    # is just the bare stock name for every contract (no
+                    # strike/CE-PE/qty in the header itself to tell separate
+                    # contracts apart). So within each stock, we further match
+                    # each position to its OWN chain rows by "Qty Out" — the
+                    # one field that reliably lines up with a specific
+                    # contract's current open quantity (confirmed against the
+                    # client's ledger: qty 660/1200/1560/1560/2040 each map to
+                    # a distinct strike+side). If nothing matches by qty, we
+                    # fall back to showing the full merged chain rather than
+                    # hiding data.
                     by_stock = {}
                     for r in rolled_rows:
                         stock = underlying_symbol(r.get("symbol", ""))
@@ -1697,22 +1750,27 @@ def render_live(engine: "LiveEngine"):
 
                     with st.expander(f"🔄 Rollover positions ({len(rolled_rows)})"):
                         for stock in sorted(by_stock.keys()):
-                            stock_rows = sorted(by_stock[stock], key=lambda x: x.get("symbol", ""))
-                            chain = engine.rollovers.get(stock, [])
+                            stock_rows = sorted(by_stock[stock], key=lambda x: (_parse_num(x.get("qty")) or 0))
+                            full_chain = engine.rollovers.get(stock, [])
                             st.markdown(f"**{stock}**")
                             for r in stock_rows:
+                                r_qty = _parse_num(r.get("qty"))
+                                matched_chain = [
+                                    row for row in full_chain
+                                    if r_qty is not None and _parse_num(row.get("Qty Out")) == r_qty
+                                ] or full_chain
+                                contract_label = contract_display(r)
                                 mtm_txt = fmt_money(r.get("mtm"))
                                 st.markdown(
-                                    f"&nbsp;&nbsp;{r.get('symbol', '-')} — Qty {fmt_qty(r.get('qty'))} · "
+                                    f"**{contract_label}** — Qty {fmt_qty(r.get('qty'))} · "
                                     f"Avg {fmt_money(r.get('avgPrice'))} · CMP {fmt_money(r.get('ltp'))} · "
-                                    f"MTM {mtm_txt}",
-                                    unsafe_allow_html=True,
+                                    f"MTM {mtm_txt}"
                                 )
-                            st.dataframe(
-                                pd.DataFrame(chain),
-                                hide_index=True,
-                                use_container_width=True,
-                            )
+                                st.dataframe(
+                                    pd.DataFrame(matched_chain),
+                                    hide_index=True,
+                                    use_container_width=True,
+                                )
                             st.divider()
 
     with tab_closed:
