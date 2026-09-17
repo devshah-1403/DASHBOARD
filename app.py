@@ -136,7 +136,9 @@ def inject_theme():
                 radial-gradient(circle at 85% 10%, rgba(52,213,200,0.08), transparent 35%),
                 var(--bg);
             color: var(--text);
+            overflow-x: hidden; /* belt-and-braces: nothing on this page should ever force a horizontal swipe */
         }
+        html, body { overflow-x: hidden; }
 
         section[data-testid="stSidebar"] {
             background: var(--panel);
@@ -144,6 +146,9 @@ def inject_theme():
         }
 
         div.block-container { padding-top: 2rem; padding-bottom: 3rem; max-width: 1300px; }
+        @media (max-width: 640px) {
+            div.block-container { padding-left: 0.9rem; padding-right: 0.9rem; padding-top: 1rem; }
+        }
 
         /* Header */
         .db-header {
@@ -222,12 +227,12 @@ def inject_theme():
         /* Top status + live clock bar */
         .top-bar {
             display: flex; align-items: center; justify-content: space-between;
-            background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px;
-            padding: 10px 18px; margin-bottom: 20px;
+            flex-wrap: wrap; background: var(--panel-2); border: 1px solid var(--border);
+            border-radius: 12px; padding: 10px 18px; margin-bottom: 20px; gap: 8px 14px;
         }
         .top-clock {
             font-family: 'Calibri', 'Carlito', 'Segoe UI', sans-serif; font-size: 0.82rem; color: var(--text);
-            display: flex; align-items: center; gap: 10px;
+            display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; white-space: nowrap;
         }
         .top-clock .date-part { color: var(--muted); }
         .top-clock .tz-badge {
@@ -235,22 +240,36 @@ def inject_theme():
             background: rgba(52,213,200,0.1); border: 1px solid rgba(52,213,200,0.25);
             padding: 1px 7px; border-radius: 999px;
         }
+        /* On phones, drop the weekday ("Thursday, ") so the whole clock
+           strip ("17 Sep 2026  11:37:33  IST") reliably fits one line
+           instead of wrapping across three. */
+        @media (max-width: 640px) {
+            .top-bar { padding: 10px 14px; }
+            .top-clock .weekday-part { display: none; }
+        }
 
         /* Segment-scoped one-line summary (shown inside each open/closed
-           segment tab — reflects ONLY that segment, not the whole book). */
+           segment tab — reflects ONLY that segment, not the whole book).
+           A responsive grid rather than a free-flowing flex row, so on a
+           narrow phone the stats stack into a clean 1-column list instead
+           of wrapping unevenly mid-row. */
         .seg-summary {
-            display: flex; flex-wrap: wrap; align-items: center; gap: 22px;
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+            gap: 10px 22px; align-items: center;
             background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px;
-            padding: 10px 18px; margin-bottom: 16px;
+            padding: 12px 18px; margin-bottom: 16px;
         }
-        .seg-stat { display: flex; align-items: center; gap: 8px; }
+        .seg-stat { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        @media (max-width: 480px) {
+            .seg-summary { grid-template-columns: 1fr; }
+        }
         .seg-stat-label {
             font-size: 0.68rem; font-weight: 600; text-transform: uppercase;
             letter-spacing: 0.05em; color: var(--muted);
         }
         .seg-stat-value {
             font-family: 'Calibri', 'Carlito', 'Segoe UI', sans-serif;
-            font-size: 0.88rem; font-weight: 700;
+            font-size: 0.88rem; font-weight: 700; white-space: nowrap;
         }
 
         /* Position cards */
@@ -592,31 +611,62 @@ def inject_theme():
             .hero-dual-divider { display: none; }
         }
 
-        /* Plain bordered stat tiles under a hero block. Always ONE row:
-           auto-fit + minmax used to wrap a card to a second row once the
-           strip ran out of horizontal space (e.g. 7 tiles at 170px min each
-           needs ~1260px). grid-auto-flow: column instead lays every tile
-           into the same row and, if the strip is still too narrow (small
-           screens), lets it scroll horizontally rather than wrap. */
+        /* Plain bordered stat tiles under a hero block. Wraps into as many
+           rows as needed (auto-fit) so every tile is always visible without
+           ever needing a horizontal swipe — on mobile this collapses to a
+           tidy 2-column grid instead of a cut-off horizontally-scrolling
+           strip. */
         .hero-tiles {
-            display: grid; grid-auto-flow: column; grid-auto-columns: minmax(130px, 1fr);
-            gap: 10px; margin-bottom: 26px; overflow-x: auto; padding-bottom: 2px;
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px; margin-bottom: 26px;
+        }
+        @media (max-width: 640px) {
+            .hero-tiles { grid-template-columns: repeat(2, 1fr); gap: 8px; }
         }
         .hero-tile {
             background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px;
-            padding: 11px 14px; min-width: 130px;
+            padding: 11px 14px; min-width: 0;
         }
         .hero-tile-label {
             font-size: 0.58rem; font-weight: 700; text-transform: uppercase;
             letter-spacing: 0.04em; color: var(--muted); margin-bottom: 6px;
-            white-space: nowrap;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
         .hero-tile-value {
             font-family: 'Calibri', 'Carlito', 'Segoe UI', sans-serif;
             font-size: 0.88rem; font-weight: 700; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis;
         }
         .hero-tile-value.positive { color: var(--pos); }
         .hero-tile-value.negative { color: var(--neg); }
+
+        /* Rollover-chain leg — a compact stat card replacing a wide
+           st.dataframe (Date/From/To/Qty/prices...) that forced horizontal
+           scrolling on mobile. Same visual language as .hero-tile. */
+        .roll-chain-card {
+            background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px;
+            padding: 12px 14px; margin-bottom: 10px;
+        }
+        .roll-chain-head {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border);
+            font-family: 'Calibri', 'Carlito', 'Segoe UI', sans-serif; font-size: 0.8rem; font-weight: 700;
+        }
+        .roll-chain-arrow { color: var(--accent); font-weight: 700; }
+        .roll-chain-grid {
+            display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 8px;
+        }
+        @media (max-width: 640px) {
+            .roll-chain-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+        .roll-chain-stat-label {
+            font-size: 0.6rem; font-weight: 600; text-transform: uppercase;
+            letter-spacing: 0.04em; color: var(--muted); margin-bottom: 3px;
+        }
+        .roll-chain-stat-value {
+            font-family: 'Calibri', 'Carlito', 'Segoe UI', sans-serif;
+            font-size: 0.8rem; font-weight: 700;
+        }
 
         .news-item {
             padding: 12px 10px 12px 12px; border-bottom: 1px solid var(--border);
@@ -655,9 +705,6 @@ def inject_theme():
         }
         </style>
         <style>
-        /* Thin, unobtrusive scrollbar for .hero-tiles when it does need to scroll. */
-        .hero-tiles::-webkit-scrollbar { height: 4px; }
-        .hero-tiles::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
         """,
         unsafe_allow_html=True,
     )
@@ -1569,6 +1616,45 @@ def contract_display(r: dict) -> str:
     return stock
 
 
+def roll_chain_card_html(row: dict) -> str:
+    """One rollover-chain leg (Date, From Series → To Series, Qty rolled,
+    last-month price, roll sell/buy price, roll diff, carry-forward price)
+    rendered as a compact stat card instead of a row in a wide st.dataframe
+    — the dataframe's ~7 columns forced horizontal scrolling on mobile;
+    this reflows into 2-3 columns per screen width with nothing to swipe."""
+    date_txt = fmt_expiry(row.get("Date")) if row.get("Date") else "-"
+    from_s = row.get("From Series") or "-"
+    to_s = row.get("To Series") or "-"
+
+    def _money(key):
+        v = _parse_num(row.get(key))
+        return fmt_money(v) if v is not None else "-"
+
+    qty_out = _parse_num(row.get("Qty Out"))
+    stats = [
+        ("Qty Rolled", fmt_qty(qty_out) if qty_out is not None else "-"),
+        ("Last Month Price", _money("Last Month Price")),
+        ("Roll Sell Price", _money("Roll Sell Price")),
+        ("Roll Buy Price", _money("Roll Buy Price")),
+        ("Roll Diff", _money("Roll Diff")),
+        ("Carry-Fwd Price", _money("Carry-Forward Price")),
+    ]
+    stats_html = "".join(
+        f'<div><div class="roll-chain-stat-label">{lbl}</div>'
+        f'<div class="roll-chain-stat-value">{val}</div></div>'
+        for lbl, val in stats
+    )
+    return flat(f"""
+        <div class="roll-chain-card">
+            <div class="roll-chain-head">
+                <span>{date_txt}</span>
+                <span class="roll-chain-arrow">{from_s} → {to_s}</span>
+            </div>
+            <div class="roll-chain-grid">{stats_html}</div>
+        </div>
+    """)
+
+
 def rollover_badge_html(symbol: str, rollovers: dict) -> str:
     """A small '🔄 Rolled' pill for a symbol's row (open positions, live
     table) when its underlying stock has rollover history — so anyone
@@ -1651,7 +1737,7 @@ def render_live(engine: "LiveEngine"):
         <div class="top-bar">
             {status_html}
             <div class="top-clock">
-                <span class="date-part">{now_ist.strftime("%A, %d %b %Y")}</span>
+                <span class="date-part"><span class="weekday-part">{now_ist.strftime("%A")}, </span>{now_ist.strftime("%d %b %Y")}</span>
                 <span>{now_ist.strftime("%H:%M:%S")}</span>
                 <span class="tz-badge">IST</span>
             </div>
@@ -1952,10 +2038,9 @@ def render_live(engine: "LiveEngine"):
                                     f"Avg {fmt_money(r.get('avgPrice'))} · CMP {fmt_money(r.get('ltp'))} · "
                                     f"MTM {mtm_txt}"
                                 )
-                                st.dataframe(
-                                    pd.DataFrame(matched_chain),
-                                    hide_index=True,
-                                    use_container_width=True,
+                                st.markdown(
+                                    "".join(roll_chain_card_html(row) for row in matched_chain),
+                                    unsafe_allow_html=True,
                                 )
                             st.divider()
 
