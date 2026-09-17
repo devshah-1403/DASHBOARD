@@ -408,6 +408,33 @@ def inject_theme():
             color: #05070d; white-space: nowrap; flex-shrink: 0;
         }
 
+        /* Collapsible F&O summary row — a stock/index with multiple lots
+           (e.g. rolled from one expiry to the next) collapses into ONE
+           qty-weighted-average line by default; expanding it reveals the
+           original per-lot rows with their real sell dates. Built on the
+           native <details>/<summary> pair, so no JS is needed. */
+        details.pt-details { border-bottom: 1px solid var(--border); }
+        details.pt-details:last-child { border-bottom: none; }
+        summary.pos-table-row { list-style: none; cursor: pointer; border-bottom: none; }
+        summary.pos-table-row::-webkit-details-marker { display: none; }
+        summary.pos-table-row:hover { background: rgba(255,255,255,0.025); }
+        .pt-expand-chevron {
+            display: inline-block; font-size: 0.65rem; color: var(--muted);
+            transition: transform 0.18s ease; flex-shrink: 0;
+        }
+        details.pt-details[open] summary .pt-expand-chevron { transform: rotate(90deg); color: var(--accent); }
+        .pt-lot-count {
+            font-size: 0.6rem; font-weight: 700; color: var(--accent);
+            background: rgba(52,213,200,0.1); border: 1px solid rgba(52,213,200,0.25);
+            padding: 1px 8px; border-radius: 999px; white-space: nowrap; flex-shrink: 0;
+        }
+        .pt-details-body { background: rgba(255,255,255,0.015); padding: 2px 0 6px 0; }
+        .pt-details-body .pos-table-row:last-child { border-bottom: none; }
+        .pt-details-label {
+            font-size: 0.64rem; font-weight: 600; color: var(--muted);
+            text-transform: uppercase; letter-spacing: 0.05em; padding: 8px 6px 2px 6px;
+        }
+
         /* Mobile reflow — desktop grid (above) is untouched. Below 640px the
            8-col (open) / 7-col (closed) grid no longer fits, so instead of
            forcing a horizontal scroll we restack each row into a compact
@@ -1978,6 +2005,65 @@ def render_live(engine: "LiveEngine"):
                     </div>
                 """)
 
+            def fno_group_summary(stock, stock_rows):
+                """Collapse a stock's/index's closed F&O lots (e.g. a position
+                rolled from one expiry series to the next) into ONE row: qty
+                as the sum across lots, buy/sell price as the qty-weighted
+                average across lots, and the sell date shown as a range. Pure
+                display aggregation — the underlying FIFO-matched lots
+                (stock_rows, straight from build_positions/closed_positions)
+                are left completely unchanged and remain visible when this
+                summary row is expanded."""
+                total_qty = sum(abs(c.get("Qty") or 0) for c in stock_rows)
+                if total_qty:
+                    avg_buy = sum(abs(c.get("Qty") or 0) * (c.get("AvgBuyPrice") or 0) for c in stock_rows) / total_qty
+                    avg_sell = sum(abs(c.get("Qty") or 0) * (c.get("AvgSellPrice") or 0) for c in stock_rows) / total_qty
+                else:
+                    avg_buy = avg_sell = 0.0
+                dates = [_closed_sell_date(c) for c in stock_rows if _closed_sell_date(c)]
+                if dates:
+                    d_min, d_max = min(dates), max(dates)
+                    date_disp = fmt_sell_date(d_min) if d_min == d_max else f"{fmt_sell_date(d_min)} – {fmt_sell_date(d_max)}"
+                else:
+                    date_disp = "-"
+                return {
+                    "Symbol": stock,
+                    "Exchange": stock_rows[0].get("Exchange", "-") if stock_rows else "-",
+                    "Qty": total_qty,
+                    "AvgBuyPrice": avg_buy,
+                    "AvgSellPrice": avg_sell,
+                    "SellDateDisplay": date_disp,
+                    "BookedPnL": sum(x["BookedPnL"] for x in stock_rows),
+                }
+
+            def fno_summary_row_html(summary, lot_count, is_top=False):
+                pnl = summary["BookedPnL"]
+                pnl_cls = "pt-cell pos" if pnl >= 0 else "pt-cell neg"
+                pnl_arrow = "▲" if pnl >= 0 else "▼"
+                row_cls = "pos-table-row cols-closed" + (" top-gain-row" if is_top else "")
+                if is_top and pnl > 0:
+                    leader_badge = '<span class="pt-leader-badge">🔥 Top Gain</span>'
+                elif is_top:
+                    leader_badge = '<span class="pt-leader-badge">🛡️ Least Loss</span>'
+                else:
+                    leader_badge = ""
+                return flat(f"""
+                    <summary class="{row_cls}">
+                        <div class="pt-symbol">
+                            <span class="pt-expand-chevron">▶</span>
+                            <span class="pt-symbol-name">{summary['Symbol']}</span>
+                            <span class="pt-lot-count">{lot_count} lots · wtd avg</span>
+                            {leader_badge}
+                        </div>
+                        <div class="pt-cell muted">{summary['Exchange']}</div>
+                        <div class="pt-cell">{fmt_qty(summary['Qty'])}</div>
+                        <div class="pt-cell">{fmt_money(summary['AvgBuyPrice'])}</div>
+                        <div class="pt-cell">{fmt_money(summary['AvgSellPrice'])}</div>
+                        <div class="pt-cell muted">{summary['SellDateDisplay']}</div>
+                        <div class="{pnl_cls}">{pnl_arrow} {fmt_money(pnl)}</div>
+                    </summary>
+                """)
+
             closed_equity = [c for c in closed if c.get("Segment") == "Equity"]
             closed_fo = [c for c in closed if c.get("Segment") == "F&O"]
             closed_segments = [("Equity", closed_equity), ("F&O", closed_fo)]
@@ -2063,28 +2149,55 @@ def render_live(engine: "LiveEngine"):
                             key=lambda x: _closed_sell_date(x) or datetime.min,
                         )
                         stock_total = sum(x["BookedPnL"] for x in stock_rows)
-                        rows_html = [
-                            closed_row_html(
-                                c,
-                                is_top=(best_pnl is not None and c["BookedPnL"] == best_pnl),
-                            )
+                        stock_is_top = any(
+                            best_pnl is not None and c["BookedPnL"] == best_pnl
                             for c in stock_rows
-                        ]
+                        )
                         st.markdown(
                             f'<div class="section-label" style="margin-top:16px;">{stock} '
                             f'<span class="badge">{len(stock_rows)}</span></div>',
                             unsafe_allow_html=True,
                         )
-                        table_html = flat(f"""
-                            <div class="pos-table-wrap">
-                                <div class="pos-table">
-                                    {closed_table_head}
-                                    {"".join(rows_html)}
-                                    {closed_total_row_html(stock_total) if len(stock_rows) > 1 else ""}
+                        if len(stock_rows) > 1:
+                            # Multiple lots (typically a rolled position) —
+                            # one weighted-average line by default; expand to
+                            # see each original FIFO-matched lot with its
+                            # actual sell date, exactly as build_positions
+                            # produced it (rows_html below is untouched).
+                            summary = fno_group_summary(stock, stock_rows)
+                            summary_html = fno_summary_row_html(summary, len(stock_rows), is_top=stock_is_top)
+                            rows_html = [
+                                closed_row_html(
+                                    c,
+                                    is_top=(best_pnl is not None and c["BookedPnL"] == best_pnl),
+                                )
+                                for c in stock_rows
+                            ]
+                            detail_html = flat(f"""
+                                <div class="pos-table-wrap">
+                                    <div class="pos-table">
+                                        <details class="pt-details">
+                                            {summary_html}
+                                            {closed_table_head}
+                                            <div class="pt-details-body">
+                                                {"".join(rows_html)}
+                                                {closed_total_row_html(stock_total)}
+                                            </div>
+                                        </details>
+                                    </div>
                                 </div>
-                            </div>
-                        """)
-                        st.markdown(table_html, unsafe_allow_html=True)
+                            """)
+                            st.markdown(detail_html, unsafe_allow_html=True)
+                        else:
+                            table_html = flat(f"""
+                                <div class="pos-table-wrap">
+                                    <div class="pos-table">
+                                        {closed_table_head}
+                                        {closed_row_html(stock_rows[0], is_top=stock_is_top)}
+                                    </div>
+                                </div>
+                            """)
+                            st.markdown(table_html, unsafe_allow_html=True)
                 else:
                     sorted_rows = sorted(rows, key=lambda x: x["BookedPnL"], reverse=True)
                     rows_html = [
