@@ -59,12 +59,18 @@ from token_resolver import resolve_all
 IST = ZoneInfo("Asia/Kolkata")
 
 
-def _fetch_ledger_records(apps_script_url: str, sheet_name: str | None = None):
+def _fetch_ledger_records(apps_script_url: str, sheet_name: str | None = None, raw: bool = False):
     """Hits the Apps Script Web App's /exec URL and returns its JSON body
-    (a list of row-dicts) directly — no CSV parsing involved. See Code.gs
-    for the doGet handler this talks to.
+    directly — no CSV parsing involved. See Code.gs for the doGet handler
+    this talks to. Normally returns a list of row-dicts (header-keyed);
+    with raw=True (used for the block-structured per-client Rollover tab,
+    which has no single header row) it instead returns the raw 2-D grid
+    of cell values, unmodified.
     """
-    params = {"sheet": sheet_name} if sheet_name else None
+    params = {"sheet": sheet_name} if sheet_name else {}
+    if raw:
+        params["raw"] = "1"
+    params = params or None
 
     last_err = None
     for attempt in range(3):
@@ -799,8 +805,60 @@ def is_admin() -> bool:
 
 
 # ── Background engine: login + FIFO build + token resolve + live WS feed ──
+_ROLLOVER_FIELDS = [
+    "Date", "From Series", "To Series", "Qty Out",
+    "Last Month Price", "Roll Sell Price", "Roll Buy Price",
+    "Roll Diff", "Carry-Forward Price",
+]
+
+
+def _parse_rollover_grid(values):
+    """Parse the raw grid of a per-client Rollover tab into
+    {STOCK: [entry, ...]}. The tab is laid out as a human-readable report
+    (matching the client-facing Excel export): a row with just the
+    stock/index name, then a blank row, then a header row starting with
+    'Date', then that stock's data rows, then a blank row, repeated per
+    stock. The header LABELS after 'Date' vary block to block (e.g. 'Qty
+    Out (sold)' vs 'Qty Rolled', 'Carry-Forward Price' vs 'Carry-Fwd
+    Price'), but their COLUMN POSITION doesn't, so this reads positionally
+    off the header row's first non-blank column rather than matching label
+    text: Date, From Series, To Series, Qty Out, Last Month Price, Roll
+    Sell Price, Roll Buy Price, Roll Diff, Carry-Forward Price, in that
+    fixed order.
+    """
+    by_stock = {}
+    current_stock = None
+    data_col = None
+
+    for row in values:
+        non_blank = [(i, c) for i, c in enumerate(row) if str(c).strip() != ""]
+        if not non_blank:
+            continue  # blank row — separates blocks
+        if len(non_blank) == 1:
+            _, val = non_blank[0]
+            sval = str(val).strip()
+            if sval.lower() == "date":
+                continue  # a lone 'Date' cell isn't a real header row
+            current_stock = sval.upper()
+            data_col = None
+            continue
+        first_idx, first_val = non_blank[0]
+        if str(first_val).strip().lower() == "date":
+            data_col = first_idx  # this block's header row — remember where data starts
+            continue
+        if current_stock is None or data_col is None:
+            continue  # a data-looking row before we know which block it belongs to
+        entry = {
+            field: (row[data_col + offset] if data_col + offset < len(row) else None)
+            for offset, field in enumerate(_ROLLOVER_FIELDS)
+        }
+        by_stock.setdefault(current_stock, []).append(entry)
+
+    return by_stock
+
+
 class LiveEngine:
-    def __init__(self, ledger_rows, apps_script_url=None):
+    def __init__(self, ledger_rows, apps_script_url=None, ledger_sheet_name=None):
         self.lock = threading.Lock()
         self.latest_prices = {}       # token -> tick dict
         self.token_to_symbol = {}     # token -> meta
@@ -810,6 +868,13 @@ class LiveEngine:
         self.error = None
         self.last_tick_ts = None      # datetime of most recently received tick
         self.apps_script_url = apps_script_url
+        # Your Code.gs reads one tab per client (e.g. the "Rohan" tab for
+        # that client's ledger) via ?sheet=<tab name>. Rollover data is
+        # per-client too ("I will add rollover sheet as per client name"),
+        # so the natural tab name is "<ledger tab> Rollover" — e.g. a
+        # "Rohan Rollover" tab alongside the existing "Rohan" tab. Adjust
+        # this one line if you end up naming it differently.
+        self.rollover_sheet_name = f"{ledger_sheet_name} Rollover" if ledger_sheet_name else "Rollover"
         self.rollovers = {}           # underlying symbol -> list of rollover-chain dicts
         # Positions/token-resolution/login are all network calls and can take
         # several seconds. Do them in a background thread so get_engine()
@@ -819,46 +884,32 @@ class LiveEngine:
         threading.Thread(target=self._start, args=(ledger_rows,), daemon=True).start()
 
     def _load_rollovers(self):
-        """Best-effort fetch of this client's 'Rollover' sheet tab, if one
-        exists. Expected layout — one flat row per rollover event, columns
-        (any case, extra whitespace/newlines in the header are fine):
-        Stock, Date, From Series, To Series, Qty Out, Last Month Price,
-        Roll Sell Price, Roll Buy Price, Roll Diff, Carry-Forward Price.
-        Most clients won't have this tab yet, so any failure (missing tab,
-        Apps Script error, bad network) is swallowed — this must never
-        break the main ledger/positions load, it only enables the optional
-        rollover-history expander once a client's sheet has one."""
+        """Best-effort fetch of this client's Rollover tab, if one exists.
+        Unlike the ledger tab, this one is a human-readable report — a
+        row with just the stock/index name, then a header row ('Date',
+        'From...', ...), then that stock's data rows, then a blank row,
+        repeated per stock (no single header row for the whole sheet, so
+        the generic doGet's header-keyed JSON doesn't apply here). This
+        fetches the tab in raw-grid mode (Code.gs's ?raw=1) and parses the
+        blocks in _parse_rollover_grid.
+        Most clients won't have this tab yet, so a 404 ("Sheet not
+        found") or any other failure here is swallowed — this must never
+        break the main ledger/positions load, it only enables the
+        optional rollover-history expander once a client's tab has real
+        data."""
         if not self.apps_script_url:
             return
         try:
-            records = _fetch_ledger_records(self.apps_script_url, "Rollover")
+            grid = _fetch_ledger_records(self.apps_script_url, self.rollover_sheet_name, raw=True)
         except Exception:
             return
-        if not isinstance(records, list):
+        if not isinstance(grid, list):
             return
-        by_stock = {}
-        for row in records:
-            if not isinstance(row, dict):
-                continue
-            norm = {
-                re.sub(r"\s+", " ", str(k).replace("\n", " ")).strip().lower(): v
-                for k, v in row.items()
-            }
-            stock = norm.get("stock") or norm.get("symbol") or norm.get("underlying")
-            if not stock:
-                continue
-            entry = {
-                "Date": norm.get("date"),
-                "From Series": norm.get("from series"),
-                "To Series": norm.get("to series"),
-                "Qty Out": norm.get("qty out"),
-                "Last Month Price": norm.get("last month price"),
-                "Roll Sell Price": norm.get("roll sell price"),
-                "Roll Buy Price": norm.get("roll buy price"),
-                "Roll Diff": norm.get("roll diff"),
-                "Carry-Forward Price": norm.get("carry-forward price") or norm.get("carry forward price"),
-            }
-            by_stock.setdefault(str(stock).strip().upper(), []).append(entry)
+        try:
+            by_stock = _parse_rollover_grid(grid)
+        except Exception:
+            return
+
         with self.lock:
             self.rollovers = by_stock
 
@@ -1004,7 +1055,7 @@ class LiveEngine:
 def get_engine(apps_script_url: str, sheet_name: str | None):
     records = _fetch_ledger_records(apps_script_url, sheet_name)
     rows = load_trade_ledger_from_records(records)
-    return LiveEngine(rows, apps_script_url=apps_script_url)
+    return LiveEngine(rows, apps_script_url=apps_script_url, ledger_sheet_name=sheet_name)
 
 
 # ── News ─────────────────────────────────────────────────────────────────
