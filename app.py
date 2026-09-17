@@ -42,6 +42,7 @@ import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+from html import escape as _html_escape
 from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
@@ -374,6 +375,10 @@ def inject_theme():
         }
         .pt-tag.long { color: var(--pos); border-color: rgba(46,230,166,0.3); }
         .pt-tag.short { color: var(--neg); border-color: rgba(255,92,122,0.3); }
+        .pt-tag.rolled {
+            color: var(--accent-2); border-color: rgba(124,92,255,0.35);
+            background: rgba(124,92,255,0.08); cursor: default;
+        }
         .pt-cell { font-family: 'Calibri', 'Carlito', 'Segoe UI', sans-serif; font-size: 0.85rem; font-weight: 600; }
         .pt-cell.muted { color: var(--muted); font-weight: 500; font-size: 0.78rem; }
         .pt-cell.pos { color: var(--pos); }
@@ -1396,6 +1401,30 @@ def underlying_symbol(symbol: str) -> str:
     return m.group(1) if m else symbol
 
 
+def rollover_badge_html(symbol: str, rollovers: dict) -> str:
+    """A small '🔄 Rolled' pill for a symbol's row (open positions, live
+    table) when its underlying stock has rollover history — so anyone
+    scanning the table can see at a glance that a position was carried
+    forward rather than freshly opened, without having to go check the
+    Closed Positions tab. Hovering shows the most recent roll (series +
+    roll diff) as a tooltip. Empty string when there's no rollover data
+    for this symbol's underlying (the normal case until a client's
+    Rollover sheet has entries)."""
+    chain = rollovers.get(underlying_symbol(symbol or "-"))
+    if not chain:
+        return ""
+    last = chain[-1]
+    detail = ""
+    if last.get("From Series") and last.get("To Series"):
+        detail = f"{last['From Series']} → {last['To Series']}"
+    elif last.get("Date"):
+        detail = str(last["Date"])
+    if last.get("Roll Diff") not in (None, ""):
+        detail = f"{detail} · diff {last['Roll Diff']}" if detail else f"diff {last['Roll Diff']}"
+    tooltip = f"Rolled {len(chain)}x — last: {detail}" if detail else f"Rolled {len(chain)}x"
+    return f'<span class="pt-tag rolled" title="{_html_escape(tooltip, quote=True)}">🔄 Rolled</span>'
+
+
 def alt_dark(chart):
     """Apply a shared dark, transparent-background theme to an Altair chart."""
     return (
@@ -1609,11 +1638,13 @@ def render_live(engine: "LiveEngine"):
                 mtm_cls = "pt-cell pos" if (mtm or 0) >= 0 else "pt-cell neg"
                 mtm_arrow = "▲" if (mtm or 0) >= 0 else "▼"
                 second_col_value = fmt_expiry(r.get("expiry")) if label == "F&O" else r.get("exchange", "-")
+                roll_badge = rollover_badge_html(r.get("symbol", ""), engine.rollovers) if label == "F&O" else ""
                 rows_html.append(flat(f"""
                     <div class="{row_cls}">
                         <div class="pt-symbol">
                             <span class="pt-symbol-name">{r.get('symbol', '-')}</span>
                             <span class="pt-tag {type_cls}">{pos_type}</span>
+                            {roll_badge}
                             {leader_badge}
                         </div>
                         <div class="pt-cell muted">{second_col_value}</div>
