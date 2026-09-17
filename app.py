@@ -800,7 +800,7 @@ def is_admin() -> bool:
 
 # ── Background engine: login + FIFO build + token resolve + live WS feed ──
 class LiveEngine:
-    def __init__(self, ledger_rows):
+    def __init__(self, ledger_rows, apps_script_url=None):
         self.lock = threading.Lock()
         self.latest_prices = {}       # token -> tick dict
         self.token_to_symbol = {}     # token -> meta
@@ -809,6 +809,8 @@ class LiveEngine:
         self.status = "starting"
         self.error = None
         self.last_tick_ts = None      # datetime of most recently received tick
+        self.apps_script_url = apps_script_url
+        self.rollovers = {}           # underlying symbol -> list of rollover-chain dicts
         # Positions/token-resolution/login are all network calls and can take
         # several seconds. Do them in a background thread so get_engine()
         # (and therefore the page) returns to the browser immediately instead
@@ -816,11 +818,56 @@ class LiveEngine:
         # self.status via the live fragment until this flips to "live".
         threading.Thread(target=self._start, args=(ledger_rows,), daemon=True).start()
 
+    def _load_rollovers(self):
+        """Best-effort fetch of this client's 'Rollover' sheet tab, if one
+        exists. Expected layout — one flat row per rollover event, columns
+        (any case, extra whitespace/newlines in the header are fine):
+        Stock, Date, From Series, To Series, Qty Out, Last Month Price,
+        Roll Sell Price, Roll Buy Price, Roll Diff, Carry-Forward Price.
+        Most clients won't have this tab yet, so any failure (missing tab,
+        Apps Script error, bad network) is swallowed — this must never
+        break the main ledger/positions load, it only enables the optional
+        rollover-history expander once a client's sheet has one."""
+        if not self.apps_script_url:
+            return
+        try:
+            records = _fetch_ledger_records(self.apps_script_url, "Rollover")
+        except Exception:
+            return
+        if not isinstance(records, list):
+            return
+        by_stock = {}
+        for row in records:
+            if not isinstance(row, dict):
+                continue
+            norm = {
+                re.sub(r"\s+", " ", str(k).replace("\n", " ")).strip().lower(): v
+                for k, v in row.items()
+            }
+            stock = norm.get("stock") or norm.get("symbol") or norm.get("underlying")
+            if not stock:
+                continue
+            entry = {
+                "Date": norm.get("date"),
+                "From Series": norm.get("from series"),
+                "To Series": norm.get("to series"),
+                "Qty Out": norm.get("qty out"),
+                "Last Month Price": norm.get("last month price"),
+                "Roll Sell Price": norm.get("roll sell price"),
+                "Roll Buy Price": norm.get("roll buy price"),
+                "Roll Diff": norm.get("roll diff"),
+                "Carry-Forward Price": norm.get("carry-forward price") or norm.get("carry forward price"),
+            }
+            by_stock.setdefault(str(stock).strip().upper(), []).append(entry)
+        with self.lock:
+            self.rollovers = by_stock
+
     def _start(self, ledger_rows):
         try:
             open_positions, closed_positions = build_positions(ledger_rows, verbose=False)
             self.closed_positions = closed_positions
             self.booked_mtm_total = round(sum(c["BookedPnL"] for c in closed_positions), 2)
+            self._load_rollovers()
 
             resolved, unresolved = resolve_all(open_positions, MASTER_CACHE_PATH, MASTER_CACHE_MAX_AGE_HOURS)
             if not resolved:
@@ -957,7 +1004,7 @@ class LiveEngine:
 def get_engine(apps_script_url: str, sheet_name: str | None):
     records = _fetch_ledger_records(apps_script_url, sheet_name)
     rows = load_trade_ledger_from_records(records)
-    return LiveEngine(rows)
+    return LiveEngine(rows, apps_script_url=apps_script_url)
 
 
 # ── News ─────────────────────────────────────────────────────────────────
@@ -1280,6 +1327,22 @@ def fmt_expiry(e):
         return e.strftime("%d %b %Y")
     except AttributeError:
         return str(e)
+
+
+_FNO_SUFFIX_RE = re.compile(r"^([A-Z&\-]+?)\d{1,2}[A-Z]{3,9}\d{2,4}(?:\d+(?:CE|PE)|FUT)$")
+
+
+def underlying_symbol(symbol: str) -> str:
+    """Strip the expiry/strike/option-type suffix off an F&O trading symbol
+    to get the underlying stock/index name — e.g. 'HDFCBANK30JUN26FUT' ->
+    'HDFCBANK', 'NIFTY28APR2622500CE' -> 'NIFTY'. Used to group a stock's
+    F&O contracts (including ones rolled from one expiry series to the
+    next) together the way the client-facing Excel report does. Equity
+    symbols have no such suffix and are returned unchanged."""
+    if not symbol:
+        return symbol
+    m = _FNO_SUFFIX_RE.match(symbol.strip().upper())
+    return m.group(1) if m else symbol
 
 
 def alt_dark(chart):
@@ -1645,28 +1708,102 @@ def render_live(engine: "LiveEngine"):
                 # Whichever row has the single highest booked P&L in this
                 # segment always gets the glow — a genuine gain reads "Top
                 # Gain", otherwise the least-bad loss reads "Least Loss".
-                sorted_rows = sorted(rows, key=lambda x: x["BookedPnL"], reverse=True)
                 best_pnl = max((c["BookedPnL"] for c in rows), default=None)
-                rows_html = [
-                    closed_row_html(
-                        c,
-                        is_top=(best_pnl is not None and c["BookedPnL"] == best_pnl),
-                    )
-                    for c in sorted_rows
-                ]
-                table_html = flat(f"""
-                    <div class="pos-table-wrap">
-                        <div class="pos-table">
-                            <div class="pos-table-head cols-closed">
-                                <div>Symbol</div><div>Exchange</div><div>Qty</div>
-                                <div>Avg Buy</div><div>Avg Sell</div><div>Sell Date</div>
-                                <div>Booked P&amp;L</div>
-                            </div>
-                            {"".join(rows_html)}
-                        </div>
+
+                closed_table_head = flat("""
+                    <div class="pos-table-head cols-closed">
+                        <div>Symbol</div><div>Exchange</div><div>Qty</div>
+                        <div>Avg Buy</div><div>Avg Sell</div><div>Sell Date</div>
+                        <div>Booked P&amp;L</div>
                     </div>
                 """)
-                st.markdown(table_html, unsafe_allow_html=True)
+
+                def closed_total_row_html(total_pnl):
+                    total_cls = "pt-cell pos" if total_pnl >= 0 else "pt-cell neg"
+                    return flat(f"""
+                        <div class="pos-table-row cols-closed" style="font-weight:700;border-top:1px solid var(--border);">
+                            <div class="pt-symbol"><span class="pt-symbol-name">Total</span></div>
+                            <div class="pt-cell muted">-</div>
+                            <div class="pt-cell">-</div>
+                            <div class="pt-cell">-</div>
+                            <div class="pt-cell">-</div>
+                            <div class="pt-cell muted">-</div>
+                            <div class="{total_cls}">{fmt_money(total_pnl)}</div>
+                        </div>
+                    """)
+
+                if label == "F&O":
+                    # Group each stock's/index's contracts together — e.g. a
+                    # position rolled from one expiry series to the next
+                    # shows as one block with a Total row, matching the
+                    # client-facing Excel report layout — instead of one
+                    # flat list of unrelated-looking rows.
+                    groups = {}
+                    for c in rows:
+                        groups.setdefault(underlying_symbol(c.get("Symbol", "-")), []).append(c)
+                    stock_order = sorted(
+                        groups.keys(),
+                        key=lambda s: sum(x["BookedPnL"] for x in groups[s]),
+                        reverse=True,
+                    )
+                    for stock in stock_order:
+                        stock_rows = sorted(
+                            groups[stock],
+                            key=lambda x: _closed_sell_date(x) or datetime.min,
+                        )
+                        stock_total = sum(x["BookedPnL"] for x in stock_rows)
+                        rows_html = [
+                            closed_row_html(
+                                c,
+                                is_top=(best_pnl is not None and c["BookedPnL"] == best_pnl),
+                            )
+                            for c in stock_rows
+                        ]
+                        st.markdown(
+                            f'<div class="section-label" style="margin-top:16px;">{stock} '
+                            f'<span class="badge">{len(stock_rows)}</span></div>',
+                            unsafe_allow_html=True,
+                        )
+                        table_html = flat(f"""
+                            <div class="pos-table-wrap">
+                                <div class="pos-table">
+                                    {closed_table_head}
+                                    {"".join(rows_html)}
+                                    {closed_total_row_html(stock_total) if len(stock_rows) > 1 else ""}
+                                </div>
+                            </div>
+                        """)
+                        st.markdown(table_html, unsafe_allow_html=True)
+
+                        # Rollover history — only shown once a client's
+                        # Google Sheet actually has a "Rollover" tab with
+                        # entries for this stock; silently absent otherwise.
+                        stock_rollovers = engine.rollovers.get(stock, [])
+                        if stock_rollovers:
+                            with st.expander(f"🔄 Rollover history — {stock} ({len(stock_rollovers)})"):
+                                st.dataframe(
+                                    pd.DataFrame(stock_rollovers),
+                                    hide_index=True,
+                                    use_container_width=True,
+                                )
+                else:
+                    sorted_rows = sorted(rows, key=lambda x: x["BookedPnL"], reverse=True)
+                    rows_html = [
+                        closed_row_html(
+                            c,
+                            is_top=(best_pnl is not None and c["BookedPnL"] == best_pnl),
+                        )
+                        for c in sorted_rows
+                    ]
+                    table_html = flat(f"""
+                        <div class="pos-table-wrap">
+                            <div class="pos-table">
+                                {closed_table_head}
+                                {"".join(rows_html)}
+                            </div>
+                        </div>
+                    """)
+                    st.markdown(table_html, unsafe_allow_html=True)
 
             # ── Charts — rendered below every position table so tables stay
             # the primary focus. Chart 1 stays full-width since a date axis
