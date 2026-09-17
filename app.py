@@ -1931,7 +1931,24 @@ def render_live(engine: "LiveEngine"):
             )
 
             def _closed_sell_date(c):
-                dates = [t.get("SellDate") for t in c.get("Trades", []) if t.get("SellDate")]
+                # Trades[].SellDate comes out of positions_builder.py's
+                # _fmt_date() as an ISO string ("2026-09-29"), or is absent
+                # entirely for a leg with no parseable sell date. Returning
+                # that string directly here meant some rows in a stock group
+                # keyed on a str (max() of the string dates) while OTHER rows
+                # (no sell date at all) fell back to `datetime.min` at the
+                # call site — mixing str and datetime keys in the same
+                # sorted() call, which raises TypeError. Parsing to real
+                # datetime objects here (or None) keeps every key the same
+                # comparable type.
+                dates = []
+                for t in c.get("Trades", []):
+                    raw = t.get("SellDate")
+                    if not raw:
+                        continue
+                    parsed = pd.to_datetime(raw, errors="coerce")
+                    if pd.notna(parsed):
+                        dates.append(parsed.to_pydatetime())
                 return max(dates) if dates else None
 
             def closed_row_html(c, is_top=False):
@@ -2068,18 +2085,6 @@ def render_live(engine: "LiveEngine"):
                             </div>
                         """)
                         st.markdown(table_html, unsafe_allow_html=True)
-
-                        # Rollover history — only shown once a client's
-                        # Google Sheet actually has a "Rollover" tab with
-                        # entries for this stock; silently absent otherwise.
-                        stock_rollovers = engine.rollovers.get(stock, [])
-                        if stock_rollovers:
-                            with st.expander(f"🔄 Rollover history — {stock} ({len(stock_rollovers)})"):
-                                st.dataframe(
-                                    pd.DataFrame(stock_rollovers),
-                                    hide_index=True,
-                                    use_container_width=True,
-                                )
                 else:
                     sorted_rows = sorted(rows, key=lambda x: x["BookedPnL"], reverse=True)
                     rows_html = [
