@@ -1720,6 +1720,11 @@ def render_live(engine: "LiveEngine"):
             # "second column".
             is_fo = label in ("Futures", "Options")
             is_options = label == "Options"
+            # Options don't roll in this workflow — only Futures do — so the
+            # "Rolled" badge and the rollover expander are scoped to Futures
+            # only, even though Options still uses the F&O-style symbol/
+            # expiry labeling above.
+            show_rollover = label == "Futures"
             second_col_label = "Expiry" if label == "Futures" else "Exchange"
 
             # Highest daily gain first, always — never a fixed/pinned order.
@@ -1752,7 +1757,7 @@ def render_live(engine: "LiveEngine"):
                 mtm = r.get("mtm")
                 mtm_cls = "pt-cell pos" if (mtm or 0) >= 0 else "pt-cell neg"
                 mtm_arrow = "▲" if (mtm or 0) >= 0 else "▼"
-                roll_badge = rollover_badge_html(r.get("symbol", ""), engine.rollovers) if is_fo else ""
+                roll_badge = rollover_badge_html(r.get("symbol", ""), engine.rollovers) if show_rollover else ""
                 symbol_label = _html_escape(contract_display(r)) if is_fo else _html_escape(str(r.get("symbol", "-")))
 
                 if is_options:
@@ -1832,7 +1837,7 @@ def render_live(engine: "LiveEngine"):
             # currently-open F&O position that's been rolled, each with its
             # live MTM plus the roll chain (from/to series, roll diff, ...)
             # that got it there.
-            if is_fo:
+            if show_rollover:
                 rolled_rows = [r for r in rows if engine.rollovers.get(underlying_symbol(r.get("symbol", "")))]
                 if rolled_rows:
                     # Group by underlying stock first — engine.rollovers holds
