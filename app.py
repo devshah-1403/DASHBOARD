@@ -349,6 +349,9 @@ def inject_theme():
         .pos-table-head.cols-open, .pos-table-row.cols-open {
             grid-template-columns: 1.5fr 0.8fr 0.8fr 1fr 1fr 1fr 1.2fr 1fr;
         }
+        .pos-table-head.cols-open-opt, .pos-table-row.cols-open-opt {
+            grid-template-columns: 1.3fr 0.65fr 0.5fr 0.8fr 0.7fr 0.9fr 0.9fr 0.8fr 1.1fr 0.9fr;
+        }
         .pos-table-head.cols-closed, .pos-table-row.cols-closed {
             grid-template-columns: 1.5fr 0.8fr 0.8fr 1fr 1fr 1fr 1.2fr;
         }
@@ -414,7 +417,7 @@ def inject_theme():
         @media (max-width: 640px) {
             .pos-table-wrap { overflow-x: visible; }
             .pos-table { min-width: 0; }
-            .pos-table-head.cols-open, .pos-table-head.cols-closed { display: none; }
+            .pos-table-head.cols-open, .pos-table-head.cols-closed, .pos-table-head.cols-open-opt { display: none; }
 
             .pos-table-row.cols-open {
                 grid-template-columns: 1fr 1fr;
@@ -441,6 +444,36 @@ def inject_theme():
             .pos-table-row.cols-open > div:nth-child(3)::before { content: "Qty "; color: var(--muted); font-weight: 500; }
             .pos-table-row.cols-open > div:nth-child(4)::before { content: "Avg "; color: var(--muted); font-weight: 500; }
             .pos-table-row.cols-open > div:nth-child(5)::before { content: "CMP "; color: var(--muted); font-weight: 500; }
+
+            .pos-table-row.cols-open-opt {
+                grid-template-columns: 1fr 1fr;
+                grid-template-areas:
+                    "sym    sym"
+                    "strike type"
+                    "exp    tick"
+                    "qty    avg"
+                    "cmp    day"
+                    "mtm    mtm";
+                row-gap: 6px;
+                column-gap: 10px;
+                padding: 14px 10px;
+            }
+            .pos-table-row.cols-open-opt > div:nth-child(1) { grid-area: sym; }
+            .pos-table-row.cols-open-opt > div:nth-child(2) { grid-area: strike; }
+            .pos-table-row.cols-open-opt > div:nth-child(3) { grid-area: type; }
+            .pos-table-row.cols-open-opt > div:nth-child(4) { grid-area: exp; }
+            .pos-table-row.cols-open-opt > div:nth-child(5) { grid-area: qty; }
+            .pos-table-row.cols-open-opt > div:nth-child(6) { grid-area: avg; }
+            .pos-table-row.cols-open-opt > div:nth-child(7) { grid-area: cmp; }
+            .pos-table-row.cols-open-opt > div:nth-child(8) { grid-area: day; text-align: right; }
+            .pos-table-row.cols-open-opt > div:nth-child(9) {
+                grid-area: mtm; text-align: right; font-size: 1rem; margin-top: 2px;
+            }
+            .pos-table-row.cols-open-opt > div:nth-child(10) { grid-area: tick; text-align: right; }
+            .pos-table-row.cols-open-opt > div:nth-child(2)::before { content: "Strike "; color: var(--muted); font-weight: 500; }
+            .pos-table-row.cols-open-opt > div:nth-child(5)::before { content: "Qty "; color: var(--muted); font-weight: 500; }
+            .pos-table-row.cols-open-opt > div:nth-child(6)::before { content: "Avg "; color: var(--muted); font-weight: 500; }
+            .pos-table-row.cols-open-opt > div:nth-child(7)::before { content: "CMP "; color: var(--muted); font-weight: 500; }
 
             .pos-table-row.cols-closed {
                 grid-template-columns: 1fr 1fr;
@@ -968,7 +1001,16 @@ class LiveEngine:
                     # (F&O tokens resolve with an expiry) or from the ledger
                     # row itself, depending on which one has it.
                     "expiry": r.get("expiry") or src.get("Expiry") or src.get("ExpiryDate") or "",
+                    # positions_builder.py keeps Strike/OptionType per contract
+                    # (it's part of the FIFO contract key) — carry them through
+                    # so the UI can show "BANKNIFTY 56000 CE" instead of just
+                    # the bare underlying name. These were previously dropped
+                    # here, which is why strike/CE-PE never reached the display.
+                    "optionType": src.get("OptionType", "") or "",
+                    "strike": src.get("Strike", "") or "",
+                    "instrumentType": src.get("InstrumentType", "") or "",
                 }
+
 
             totp = pyotp.TOTP(st.secrets["ANGEL_TOTP_SECRET"]).now()
             sc = SmartConnect(api_key=st.secrets["ANGEL_API_KEY"])
@@ -1028,6 +1070,8 @@ class LiveEngine:
                     "token": token, "symbol": meta.get("symbol", token),
                     "exchange": meta.get("exchange", ""), "segment": meta.get("segment", "Other"),
                     "positionType": meta.get("positionType", "LONG"), "expiry": meta.get("expiry", ""), "ltp": ltp,
+                    "optionType": meta.get("optionType", ""), "strike": meta.get("strike", ""),
+                    "instrumentType": meta.get("instrumentType", ""),
                     "prev_ltp": prev.get("ltp"),
                     "close": (message.get("closed_price", 0) / 100.0 if message.get("closed_price") else prev.get("close")),
                     "open": (message.get("open_price_of_the_day", 0) / 100.0 if message.get("open_price_of_the_day") else prev.get("open")),
@@ -1419,12 +1463,12 @@ def _parse_num(val):
 def contract_display(r: dict) -> str:
     """Human label for an F&O contract: underlying + strike + CE/PE (e.g.
     'BANKNIFTY 56000 CE'), or underlying + FUT — instead of just the bare
-    underlying name. The ledger clearly tracks strike/option-type as
-    separate columns (see the client's trade sheet), so this tries the
-    likely field names a resolved position dict might carry them under;
-    if none of them are actually populated at this point in the pipeline
-    (positions_builder.py / token_resolver.py decide that, not this file),
-    it falls back to whatever `symbol` already is.
+    underlying name. positions_builder.py keeps OptionType/Strike/
+    InstrumentType as part of the FIFO contract key, and LiveEngine now
+    carries them through (optionType/strike/instrumentType) onto every
+    resolved position, so those are the reliable source; a handful of
+    alternate field-name fallbacks are kept in case a row lands here
+    without going through that same path.
     """
     symbol = str(r.get("symbol") or "-").strip()
     # Already a full Angel One-style trading symbol (e.g. "BANKNIFTY25SEP2666000CE")?
@@ -1439,15 +1483,15 @@ def contract_display(r: dict) -> str:
     opt_raw = (
         r.get("optionType") or r.get("optiontype") or r.get("OptionType")
         or r.get("Option Type") or r.get("right") or r.get("Right")
-        or r.get("CE/PE") or r.get("ce_pe") or r.get("instrumentType")
+        or r.get("CE/PE") or r.get("ce_pe")
     )
     opt = str(opt_raw).strip().upper() if opt_raw else ""
+    instrument_type = str(r.get("instrumentType") or r.get("InstrumentType") or "").strip().upper()
 
-    if opt in ("CE", "PE") and strike not in (None, ""):
-        strike_num = _parse_num(strike)
-        strike_txt = fmt_qty(strike_num) if strike_num is not None else str(strike)
-        return f"{stock} {strike_txt} {opt}"
-    if opt in ("FUT", "FUTURE", "FUTURES") or "FUT" in symbol.upper():
+    strike_num = _parse_num(strike)
+    if opt in ("CE", "PE") and strike_num is not None and strike_num > 0:
+        return f"{stock} {fmt_qty(strike_num)} {opt}"
+    if instrument_type.startswith("FUT") or opt in ("FUT", "FUTURE", "FUTURES") or "FUT" in symbol.upper():
         return f"{stock} FUT"
     return stock
 
@@ -1544,8 +1588,13 @@ def render_live(engine: "LiveEngine"):
     )
 
     equity = [t for t in ticks if t.get("segment") == "Equity"]
-    fo = [t for t in ticks if t.get("segment") == "F&O"]
-    other = [t for t in ticks if t.get("segment") not in ("Equity", "F&O")]
+    bonds_etf = [t for t in ticks if t.get("segment") not in ("Equity", "F&O")]
+    fo_all = [t for t in ticks if t.get("segment") == "F&O"]
+    # Options carry a CE/PE optionType (now passed through from
+    # positions_builder.py via LiveEngine); anything F&O without CE/PE
+    # (plain FUT, or blank) is a future.
+    futures = [t for t in fo_all if str(t.get("optionType") or "").strip().upper() not in ("CE", "PE")]
+    options = [t for t in fo_all if str(t.get("optionType") or "").strip().upper() in ("CE", "PE")]
 
     def seg_totals(rows):
         # Capital deployed must use abs(qty): a short position has a
@@ -1565,17 +1614,23 @@ def render_live(engine: "LiveEngine"):
         return buy_value, mtm, day_pnl
 
     eq_buy, eq_mtm, eq_day = seg_totals(equity)
-    fo_buy, fo_mtm, fo_day = seg_totals(fo)
-    other_buy, other_mtm, other_day = seg_totals(other)
+    bonds_buy, bonds_mtm, bonds_day = seg_totals(bonds_etf)
+    fut_buy, fut_mtm, fut_day = seg_totals(futures)
+    opt_buy, opt_mtm, opt_day = seg_totals(options)
     seg_open_totals = {
         "Equity": (eq_buy, eq_mtm, eq_day),
-        "F&O": (fo_buy, fo_mtm, fo_day),
-        "Other": (other_buy, other_mtm, other_day),
+        "Bonds/ETF": (bonds_buy, bonds_mtm, bonds_day),
+        "Futures": (fut_buy, fut_mtm, fut_day),
+        "Options": (opt_buy, opt_mtm, opt_day),
     }
-    investment_value = eq_buy + fo_buy
-    current_mtm = eq_mtm + fo_mtm
+    # Headline totals: Equity + F&O (Futures + Options) only — Bonds/ETF was
+    # excluded from these before (it was folded into "Other", which was
+    # already left out of investment_value/current_mtm/day_pnl_total), so
+    # that behavior is preserved rather than silently changed here.
+    investment_value = eq_buy + fut_buy + opt_buy
+    current_mtm = eq_mtm + fut_mtm + opt_mtm
     total_mtm = engine.booked_mtm_total + current_mtm
-    day_pnl_total = eq_day + fo_day
+    day_pnl_total = eq_day + fut_day + opt_day
     day_pnl_pct = (day_pnl_total / investment_value * 100) if investment_value else 0.0
 
     st.markdown(
@@ -1606,9 +1661,12 @@ def render_live(engine: "LiveEngine"):
     tab_open, tab_closed, tab_news = st.tabs(["📈 Open positions", "✅ Closed positions", "📰 News"])
 
     with tab_open:
-        open_segments = [("Equity", equity), ("F&O", fo)]
-        if other:
-            open_segments.append(("Other", other))
+        open_segments = [
+            ("Equity", equity),
+            ("Bonds/ETF", bonds_etf),
+            ("Futures", futures),
+            ("Options", options),
+        ]
         # One sub-tab per segment so picking "F&O" shows only F&O, not every
         # segment stacked one after another.
         open_seg_tabs = st.tabs([f"{label} ({len(rows)})" for label, rows in open_segments])
@@ -1655,9 +1713,14 @@ def render_live(engine: "LiveEngine"):
                 pos_type = (x.get("positionType") or "LONG").upper()
                 return raw_pct if pos_type == "LONG" else -raw_pct
 
-            # F&O positions care about expiry more than exchange (it's
-            # always NFO/BFO); Equity/Other show exchange as before.
-            second_col_label = "Expiry" if label == "F&O" else "Exchange"
+            # Futures and Options both care about expiry more than exchange
+            # (always NFO/BFO); Equity/Bonds-ETF show exchange as before.
+            # Options gets its own wider row template with explicit
+            # Strike/Type/Expiry columns instead of folding them into one
+            # "second column".
+            is_fo = label in ("Futures", "Options")
+            is_options = label == "Options"
+            second_col_label = "Expiry" if label == "Futures" else "Exchange"
 
             # Highest daily gain first, always — never a fixed/pinned order.
             # Positions with no price yet (None) sort to the bottom.
@@ -1678,7 +1741,8 @@ def render_live(engine: "LiveEngine"):
                 # every position in the segment is red today, the least-bad
                 # one still gets marked so there's always a clear leader.
                 is_top = idx == 0 and day_pct is not None
-                row_cls = "pos-table-row cols-open top-gain-row" if is_top else "pos-table-row cols-open"
+                row_variant = "cols-open-opt" if is_options else "cols-open"
+                row_cls = f"pos-table-row {row_variant} top-gain-row" if is_top else f"pos-table-row {row_variant}"
                 if is_top and day_pct > 0:
                     leader_badge = f'<span class="pt-leader-badge">🔥 Top Gain</span>'
                 elif is_top:
@@ -1688,37 +1752,78 @@ def render_live(engine: "LiveEngine"):
                 mtm = r.get("mtm")
                 mtm_cls = "pt-cell pos" if (mtm or 0) >= 0 else "pt-cell neg"
                 mtm_arrow = "▲" if (mtm or 0) >= 0 else "▼"
-                second_col_value = fmt_expiry(r.get("expiry")) if label == "F&O" else r.get("exchange", "-")
-                roll_badge = rollover_badge_html(r.get("symbol", ""), engine.rollovers) if label == "F&O" else ""
-                rows_html.append(flat(f"""
-                    <div class="{row_cls}">
-                        <div class="pt-symbol">
-                            <span class="pt-symbol-name">{r.get('symbol', '-')}</span>
-                            <span class="pt-tag {type_cls}">{pos_type}</span>
-                            {roll_badge}
-                            {leader_badge}
+                roll_badge = rollover_badge_html(r.get("symbol", ""), engine.rollovers) if is_fo else ""
+                symbol_label = _html_escape(contract_display(r)) if is_fo else _html_escape(str(r.get("symbol", "-")))
+
+                if is_options:
+                    strike_num = _parse_num(r.get("strike"))
+                    strike_txt = fmt_qty(strike_num) if strike_num else "-"
+                    opt_txt = str(r.get("optionType") or "-").strip().upper()
+                    expiry_txt = fmt_expiry(r.get("expiry"))
+                    rows_html.append(flat(f"""
+                        <div class="{row_cls}">
+                            <div class="pt-symbol">
+                                <span class="pt-symbol-name">{symbol_label}</span>
+                                <span class="pt-tag {type_cls}">{pos_type}</span>
+                                {roll_badge}
+                                {leader_badge}
+                            </div>
+                            <div class="pt-cell muted">{strike_txt}</div>
+                            <div class="pt-cell muted">{opt_txt}</div>
+                            <div class="pt-cell muted">{expiry_txt}</div>
+                            <div class="pt-cell">{fmt_qty(r.get('qty'))}</div>
+                            <div class="pt-cell">{fmt_money(r.get('avgPrice'))}</div>
+                            <div class="pt-cell">{fmt_money(r.get('ltp'))}</div>
+                            <div class="{day_cls}">{day_txt}</div>
+                            <div class="{mtm_cls}">{mtm_arrow} {fmt_money(mtm)}</div>
+                            <div class="pt-cell muted">{fmt_datetime(r.get('ts'))}</div>
                         </div>
-                        <div class="pt-cell muted">{second_col_value}</div>
-                        <div class="pt-cell">{fmt_qty(r.get('qty'))}</div>
-                        <div class="pt-cell">{fmt_money(r.get('avgPrice'))}</div>
-                        <div class="pt-cell">{fmt_money(r.get('ltp'))}</div>
-                        <div class="{day_cls}">{day_txt}</div>
-                        <div class="{mtm_cls}">{mtm_arrow} {fmt_money(mtm)}</div>
-                        <div class="pt-cell muted">{fmt_datetime(r.get('ts'))}</div>
-                    </div>
-                """))
-            table_html = flat(f"""
-                <div class="pos-table-wrap">
-                    <div class="pos-table">
-                        <div class="pos-table-head cols-open">
-                            <div>Symbol</div><div>{second_col_label}</div><div>Qty</div>
-                            <div>Avg Price</div><div>CMP</div><div>Day Chg %</div>
-                            <div>MTM P&amp;L</div><div>Last Tick</div>
+                    """))
+                else:
+                    second_col_value = fmt_expiry(r.get("expiry")) if label == "Futures" else r.get("exchange", "-")
+                    rows_html.append(flat(f"""
+                        <div class="{row_cls}">
+                            <div class="pt-symbol">
+                                <span class="pt-symbol-name">{symbol_label}</span>
+                                <span class="pt-tag {type_cls}">{pos_type}</span>
+                                {roll_badge}
+                                {leader_badge}
+                            </div>
+                            <div class="pt-cell muted">{second_col_value}</div>
+                            <div class="pt-cell">{fmt_qty(r.get('qty'))}</div>
+                            <div class="pt-cell">{fmt_money(r.get('avgPrice'))}</div>
+                            <div class="pt-cell">{fmt_money(r.get('ltp'))}</div>
+                            <div class="{day_cls}">{day_txt}</div>
+                            <div class="{mtm_cls}">{mtm_arrow} {fmt_money(mtm)}</div>
+                            <div class="pt-cell muted">{fmt_datetime(r.get('ts'))}</div>
                         </div>
-                        {"".join(rows_html)}
+                    """))
+            if is_options:
+                table_html = flat(f"""
+                    <div class="pos-table-wrap">
+                        <div class="pos-table">
+                            <div class="pos-table-head cols-open-opt">
+                                <div>Symbol</div><div>Strike</div><div>CE/PE</div><div>Expiry</div>
+                                <div>Qty</div><div>Avg Price</div><div>CMP</div><div>Day Chg %</div>
+                                <div>MTM P&amp;L</div><div>Last Tick</div>
+                            </div>
+                            {"".join(rows_html)}
+                        </div>
                     </div>
-                </div>
-            """)
+                """)
+            else:
+                table_html = flat(f"""
+                    <div class="pos-table-wrap">
+                        <div class="pos-table">
+                            <div class="pos-table-head cols-open">
+                                <div>Symbol</div><div>{second_col_label}</div><div>Qty</div>
+                                <div>Avg Price</div><div>CMP</div><div>Day Chg %</div>
+                                <div>MTM P&amp;L</div><div>Last Tick</div>
+                            </div>
+                            {"".join(rows_html)}
+                        </div>
+                    </div>
+                """)
             st.markdown(table_html, unsafe_allow_html=True)
 
             # Rollover positions — a real st.expander (not raw HTML) so it
@@ -1727,7 +1832,7 @@ def render_live(engine: "LiveEngine"):
             # currently-open F&O position that's been rolled, each with its
             # live MTM plus the roll chain (from/to series, roll diff, ...)
             # that got it there.
-            if label == "F&O":
+            if is_fo:
                 rolled_rows = [r for r in rows if engine.rollovers.get(underlying_symbol(r.get("symbol", "")))]
                 if rolled_rows:
                     # Group by underlying stock first — engine.rollovers holds
