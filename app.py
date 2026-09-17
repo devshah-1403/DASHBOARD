@@ -1681,22 +1681,39 @@ def render_live(engine: "LiveEngine"):
             if label == "F&O":
                 rolled_rows = [r for r in rows if engine.rollovers.get(underlying_symbol(r.get("symbol", "")))]
                 if rolled_rows:
+                    # Group by underlying stock first — engine.rollovers holds
+                    # ONE roll chain per underlying (e.g. "BANKNIFTY"), not one
+                    # per contract. Looping over rolled_rows directly re-prints
+                    # that same chain once for every open contract on that
+                    # underlying (every strike/expiry you're holding), which is
+                    # why the same table appeared repeated several times.
+                    # Grouping here means the chain is rendered exactly once
+                    # per underlying, with all of that underlying's open
+                    # contracts listed above it.
+                    by_stock = {}
+                    for r in rolled_rows:
+                        stock = underlying_symbol(r.get("symbol", ""))
+                        by_stock.setdefault(stock, []).append(r)
+
                     with st.expander(f"🔄 Rollover positions ({len(rolled_rows)})"):
-                        for r in sorted(rolled_rows, key=lambda x: x.get("symbol", "")):
-                            stock = underlying_symbol(r.get("symbol", ""))
+                        for stock in sorted(by_stock.keys()):
+                            stock_rows = sorted(by_stock[stock], key=lambda x: x.get("symbol", ""))
                             chain = engine.rollovers.get(stock, [])
-                            mtm = r.get("mtm")
-                            mtm_txt = fmt_money(mtm)
-                            st.markdown(
-                                f"**{r.get('symbol', '-')}** — Qty {fmt_qty(r.get('qty'))} · "
-                                f"Avg {fmt_money(r.get('avgPrice'))} · CMP {fmt_money(r.get('ltp'))} · "
-                                f"MTM {mtm_txt}"
-                            )
+                            st.markdown(f"**{stock}**")
+                            for r in stock_rows:
+                                mtm_txt = fmt_money(r.get("mtm"))
+                                st.markdown(
+                                    f"&nbsp;&nbsp;{r.get('symbol', '-')} — Qty {fmt_qty(r.get('qty'))} · "
+                                    f"Avg {fmt_money(r.get('avgPrice'))} · CMP {fmt_money(r.get('ltp'))} · "
+                                    f"MTM {mtm_txt}",
+                                    unsafe_allow_html=True,
+                                )
                             st.dataframe(
                                 pd.DataFrame(chain),
                                 hide_index=True,
                                 use_container_width=True,
                             )
+                            st.divider()
 
     with tab_closed:
         if not engine.closed_positions:
