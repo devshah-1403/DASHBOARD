@@ -367,17 +367,19 @@ def inject_theme():
         }
         .pos-table-row:hover { background: rgba(255,255,255,0.025); }
         .pos-table-row:last-child { border-bottom: none; }
-        .pt-symbol { display: flex; align-items: baseline; gap: 8px; }
-        .pt-symbol-name { font-weight: 700; font-size: 0.9rem; letter-spacing: -0.01em; }
+        .pt-symbol { display: flex; align-items: baseline; gap: 8px; flex-wrap: nowrap; overflow: visible; }
+        .pt-symbol-name { font-weight: 700; font-size: 0.9rem; letter-spacing: -0.01em; white-space: nowrap; }
         .pt-tag {
             font-size: 0.58rem; font-weight: 700; padding: 1px 6px; border-radius: 999px;
             border: 1px solid var(--border); color: var(--muted); text-transform: uppercase;
+            white-space: nowrap; flex-shrink: 0;
         }
         .pt-tag.long { color: var(--pos); border-color: rgba(46,230,166,0.3); }
         .pt-tag.short { color: var(--neg); border-color: rgba(255,92,122,0.3); }
         .pt-tag.rolled {
             color: var(--accent-2); border-color: rgba(124,92,255,0.35);
             background: rgba(124,92,255,0.08); cursor: default;
+            padding: 1px 5px; font-size: 0.68rem; line-height: 1;
         }
         .pt-cell { font-family: 'Calibri', 'Carlito', 'Segoe UI', sans-serif; font-size: 0.85rem; font-weight: 600; }
         .pt-cell.muted { color: var(--muted); font-weight: 500; font-size: 0.78rem; }
@@ -1669,6 +1671,32 @@ def render_live(engine: "LiveEngine"):
                 </div>
             """)
             st.markdown(table_html, unsafe_allow_html=True)
+
+            # Rollover positions — a real st.expander (not raw HTML) so it
+            # stays open across this fragment's 1s reruns, unlike the inline
+            # per-row badge which is just a quick visual flag. Shows every
+            # currently-open F&O position that's been rolled, each with its
+            # live MTM plus the roll chain (from/to series, roll diff, ...)
+            # that got it there.
+            if label == "F&O":
+                rolled_rows = [r for r in rows if engine.rollovers.get(underlying_symbol(r.get("symbol", "")))]
+                if rolled_rows:
+                    with st.expander(f"🔄 Rollover positions ({len(rolled_rows)})"):
+                        for r in sorted(rolled_rows, key=lambda x: x.get("symbol", "")):
+                            stock = underlying_symbol(r.get("symbol", ""))
+                            chain = engine.rollovers.get(stock, [])
+                            mtm = r.get("mtm")
+                            mtm_txt = fmt_money(mtm)
+                            st.markdown(
+                                f"**{r.get('symbol', '-')}** — Qty {fmt_qty(r.get('qty'))} · "
+                                f"Avg {fmt_money(r.get('avgPrice'))} · CMP {fmt_money(r.get('ltp'))} · "
+                                f"MTM {mtm_txt}"
+                            )
+                            st.dataframe(
+                                pd.DataFrame(chain),
+                                hide_index=True,
+                                use_container_width=True,
+                            )
 
     with tab_closed:
         if not engine.closed_positions:
