@@ -1623,14 +1623,13 @@ def render_live(engine: "LiveEngine"):
         "Futures": (fut_buy, fut_mtm, fut_day),
         "Options": (opt_buy, opt_mtm, opt_day),
     }
-    # Headline totals: Equity + F&O (Futures + Options) only — Bonds/ETF was
-    # excluded from these before (it was folded into "Other", which was
-    # already left out of investment_value/current_mtm/day_pnl_total), so
-    # that behavior is preserved rather than silently changed here.
-    investment_value = eq_buy + fut_buy + opt_buy
-    current_mtm = eq_mtm + fut_mtm + opt_mtm
+    # Headline totals must cover EVERY open position — no segment silently
+    # excluded. "Open MTM" is labeled "current MTM — booked plus open", so
+    # it has to include Bonds/ETF too, not just Equity/Futures/Options.
+    investment_value = eq_buy + bonds_buy + fut_buy + opt_buy
+    current_mtm = eq_mtm + bonds_mtm + fut_mtm + opt_mtm
     total_mtm = engine.booked_mtm_total + current_mtm
-    day_pnl_total = eq_day + fut_day + opt_day
+    day_pnl_total = eq_day + bonds_day + fut_day + opt_day
     day_pnl_pct = (day_pnl_total / investment_value * 100) if investment_value else 0.0
 
     st.markdown(
