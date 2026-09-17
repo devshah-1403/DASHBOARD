@@ -578,6 +578,20 @@ def inject_theme():
         .hero-pill.positive { color: var(--pos); border-color: rgba(46,230,166,0.4); background: rgba(46,230,166,0.08); }
         .hero-pill.negative { color: var(--neg); border-color: rgba(255,92,122,0.4); background: rgba(255,92,122,0.08); }
 
+        /* Two-value hero variant — used for "Live Position MTM" so the
+           headline shows current MTM *with* booked profit folded in right
+           next to the running MTM of open positions only, instead of
+           forcing the person to scan down to the small tiles to tell them
+           apart. */
+        .hero-dual { display: flex; flex-wrap: wrap; gap: 26px; }
+        .hero-dual-item { min-width: 170px; }
+        .hero-dual-item .hero-value { font-size: clamp(1.5rem, 3.2vw, 2.35rem); }
+        .hero-dual-divider { width: 1px; align-self: stretch; background: var(--border); min-height: 60px; }
+        @media (max-width: 640px) {
+            .hero-dual { gap: 16px; }
+            .hero-dual-divider { display: none; }
+        }
+
         /* Plain bordered stat tiles under a hero block. Always ONE row:
            auto-fit + minmax used to wrap a card to a second row once the
            strip ran out of horizontal space (e.g. 7 tiles at 170px min each
@@ -705,6 +719,38 @@ def hero_block(label, value, sub, is_positive, pill_text):
                 <div class="hero-sub">{sub}</div>
             </div>
             <div class="hero-pill {sign_cls}">{'▲' if is_positive else '▼'} {pill_text}</div>
+        </div>
+    """)
+
+
+def hero_block_dual(
+    primary_label, primary_value, primary_sub, primary_is_positive,
+    secondary_label, secondary_value, secondary_sub, secondary_is_positive,
+    pill_text,
+):
+    """Two headline values side by side instead of one — e.g. current MTM
+    WITH booked profit folded in, next to the running MTM of open positions
+    ONLY (no booked profit). The status pill always follows the primary
+    (booked + open) figure, since that's the number the pill's Profit/Loss
+    language describes."""
+    p_cls = "positive" if primary_is_positive else "negative"
+    s_cls = "positive" if secondary_is_positive else "negative"
+    return flat(f"""
+        <div class="hero-block">
+            <div class="hero-dual">
+                <div class="hero-dual-item">
+                    <div class="hero-label"><span class="dot {p_cls}"></span>{primary_label}</div>
+                    <div class="hero-value {p_cls}">{primary_value}</div>
+                    <div class="hero-sub">{primary_sub}</div>
+                </div>
+                <div class="hero-dual-divider"></div>
+                <div class="hero-dual-item">
+                    <div class="hero-label"><span class="dot {s_cls}"></span>{secondary_label}</div>
+                    <div class="hero-value {s_cls}">{secondary_value}</div>
+                    <div class="hero-sub">{secondary_sub}</div>
+                </div>
+            </div>
+            <div class="hero-pill {p_cls}">{'▲' if primary_is_positive else '▼'} {pill_text}</div>
         </div>
     """)
 
@@ -1660,11 +1706,15 @@ def render_live(engine: "LiveEngine"):
     day_pnl_pct = (day_pnl_total / investment_value * 100) if investment_value else 0.0
 
     st.markdown(
-        hero_block(
-            "Live Position MTM",
+        hero_block_dual(
+            "Current MTM (Booked + Open)",
             fmt_money(total_mtm),
-            "current MTM — booked plus open",
-            is_positive=total_mtm >= 0,
+            "includes booked profit from closed positions",
+            total_mtm >= 0,
+            "Running MTM (Open Only)",
+            fmt_money(current_mtm),
+            "live open positions, excludes booked profit",
+            current_mtm >= 0,
             pill_text="Profit" if total_mtm >= 0 else "Loss",
         ),
         unsafe_allow_html=True,
