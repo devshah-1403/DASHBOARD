@@ -389,7 +389,7 @@ def inject_theme():
         }
         .pos-table-row:hover { background: rgba(255,255,255,0.025); }
         .pos-table-row:last-child { border-bottom: none; }
-        .pt-symbol { display: flex; align-items: baseline; gap: 8px; flex-wrap: nowrap; overflow: visible; }
+        .pt-symbol { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; overflow: visible; min-width: 0; }
         .pt-symbol-name { font-weight: 700; font-size: 0.9rem; letter-spacing: -0.01em; white-space: nowrap; }
         .pt-tag {
             font-size: 0.58rem; font-weight: 700; padding: 1px 6px; border-radius: 999px;
