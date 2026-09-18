@@ -366,10 +366,10 @@ def inject_theme():
             column-gap: 14px;
         }
         .pos-table-head.cols-open, .pos-table-row.cols-open {
-            grid-template-columns: 1.5fr 0.8fr 0.8fr 1fr 1fr 1fr 1.2fr 1fr;
+            grid-template-columns: 2fr 0.8fr 0.8fr 1fr 1fr 1fr 1.2fr 1fr;
         }
         .pos-table-head.cols-open-opt, .pos-table-row.cols-open-opt {
-            grid-template-columns: 1.3fr 0.65fr 0.5fr 0.8fr 0.7fr 0.9fr 0.9fr 0.8fr 1.1fr 0.9fr;
+            grid-template-columns: 1.7fr 0.65fr 0.5fr 0.8fr 0.7fr 0.9fr 0.9fr 0.8fr 1.1fr 0.9fr;
         }
         .pos-table-head.cols-closed, .pos-table-row.cols-closed {
             grid-template-columns: 1.5fr 0.8fr 0.8fr 1fr 1fr 1fr 1.2fr;
@@ -2393,10 +2393,16 @@ def render_live(engine: "LiveEngine"):
                             key=lambda x: _closed_sell_date(x) or datetime.min,
                         )
                         stock_total = sum(x["BookedPnL"] for x in stock_rows)
-                        stock_is_top = any(
-                            best_pnl is not None and c["BookedPnL"] == best_pnl
-                            for c in stock_rows
-                        )
+                        # Top gain is decided by the STOCK's aggregate
+                        # (weighted-average) booked P&L — stock_order is
+                        # already sorted by that same total, so the winner
+                        # is always its first entry — never by whichever
+                        # single leg inside a multi-lot group happens to
+                        # have the best individual number (a big winning
+                        # leg can still net out below another stock's
+                        # smaller-but-consistent total once its losing
+                        # legs are included).
+                        stock_is_top = stock == stock_order[0]
                         st.markdown(
                             f'<div class="section-label" style="margin-top:16px;">{stock} '
                             f'<span class="badge">{len(stock_rows)}</span></div>',
@@ -2411,10 +2417,13 @@ def render_live(engine: "LiveEngine"):
                             summary = fno_group_summary(stock, stock_rows)
                             summary_html = fno_summary_row_html(summary, len(stock_rows), is_top=stock_is_top)
                             rows_html = [
-                                closed_row_html(
-                                    c,
-                                    is_top=(best_pnl is not None and c["BookedPnL"] == best_pnl),
-                                )
+                                # Individual legs never get their own
+                                # top-gain badge now — only the group's
+                                # aggregate summary row above does (see
+                                # stock_is_top). A single big leg inside a
+                                # losing/mediocre group used to get flagged
+                                # here on its own, which was misleading.
+                                closed_row_html(c)
                                 for c in stock_rows
                             ]
                             detail_html = flat(f"""
