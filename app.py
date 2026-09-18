@@ -964,69 +964,6 @@ def is_admin() -> bool:
     return current_client_cfg().get("is_admin", False)
 
 
-# ── Multi-portfolio support (one login, several portfolios) ────────────────
-#
-# A client can now own more than one portfolio (e.g. RW / PRO / MIDCAP) so
-# the three of you don't need three separate logins. Add a nested
-# [clients.X.portfolios.Y] table under that client's secrets block:
-#
-# [clients.SHARED]
-# password     = "sharedpass"
-# display_name = "Shared login"
-#
-#   [clients.SHARED.portfolios.RW]
-#   display_name    = "RW"
-#   apps_script_url = "https://script.google.com/macros/s/AAA.../exec"
-#   sheet_name      = "RW"
-#
-#   [clients.SHARED.portfolios.PRO]
-#   display_name    = "PRO"
-#   apps_script_url = "https://script.google.com/macros/s/BBB.../exec"
-#   sheet_name      = "PRO"
-#
-#   [clients.SHARED.portfolios.MIDCAP]
-#   display_name    = "Midcap"
-#   apps_script_url = "https://script.google.com/macros/s/CCC.../exec"
-#   sheet_name      = "Midcap"
-#
-# Whoever signs in as SHARED then gets a "Portfolio" switcher in the sidebar
-# instead of three separate client logins. A client with no [portfolios]
-# sub-table keeps working exactly as before (its own apps_script_url /
-# sheet_name become a single implicit portfolio).
-
-def client_portfolios(cfg: dict) -> dict:
-    """Return dict of portfolio_id -> portfolio config dict for a client.
-
-    Falls back to one implicit portfolio (built from the client's own
-    apps_script_url/sheet_name/display_name) when the client has no
-    [portfolios] sub-table configured — fully backward compatible.
-    """
-    raw = cfg.get("portfolios")
-    if not raw:
-        return {
-            "_DEFAULT": {
-                "display_name":    cfg.get("display_name", "Portfolio"),
-                "apps_script_url": cfg.get("apps_script_url", ""),
-                "sheet_name":      cfg.get("sheet_name", ""),
-            }
-        }
-    portfolios = {}
-    for k, v in raw.items():
-        pcfg = dict(v)
-        pcfg.setdefault("display_name", k)
-        pcfg.setdefault("apps_script_url", cfg.get("apps_script_url", ""))
-        pcfg.setdefault("sheet_name", "")
-        portfolios[k.upper()] = pcfg
-    return portfolios
-
-
-def selected_portfolio_key() -> str:
-    """Session-state key used to remember which portfolio the current
-    client last picked (namespaced per client so switching clients — e.g.
-    via the admin 'view client' selector — doesn't leak the pick across)."""
-    return f"_selected_portfolio__{st.session_state.get('_client_id', '')}"
-
-
 # ── Background engine: login + FIFO build + token resolve + live WS feed ──
 _ROLLOVER_FIELDS = [
     "Date", "From Series", "To Series", "Qty Out",
@@ -2639,23 +2576,6 @@ def main():
     inject_theme()
 
     client_name_disp = current_client_name()
-
-    cfg        = current_client_cfg()
-    client_name = current_client_name()
-    portfolios  = client_portfolios(cfg)
-    portfolio_ids = list(portfolios.keys())
-    pf_key = selected_portfolio_key()
-    if st.session_state.get(pf_key) not in portfolio_ids:
-        st.session_state[pf_key] = portfolio_ids[0]
-    selected_portfolio_id = st.session_state[pf_key]
-    pcfg        = portfolios[selected_portfolio_id]
-    script_url  = pcfg.get("apps_script_url", "")
-    sheet_tab   = pcfg.get("sheet_name", "") or ""
-    portfolio_suffix = (
-        f' &nbsp;·&nbsp; <span style="color:var(--accent);">{_html_escape(pcfg.get("display_name", ""))}</span>'
-        if len(portfolio_ids) > 1 else ""
-    )
-
     st.markdown(
         flat(f"""
         <div class="db-header">
@@ -2664,12 +2584,17 @@ def main():
                 <h1>Booked Profit Dashboard</h1>
             </div>
             <div style="font-size:.82rem;color:var(--muted);">
-                Portfolio of &nbsp;<strong style="color:var(--text);">{client_name_disp}</strong>{portfolio_suffix}
+                Portfolio of &nbsp;<strong style="color:var(--text);">{client_name_disp}</strong>
             </div>
         </div>
         """),
         unsafe_allow_html=True,
     )
+
+    cfg        = current_client_cfg()
+    client_name = current_client_name()
+    script_url  = cfg.get("apps_script_url", "")
+    sheet_tab   = cfg.get("sheet_name", "") or ""
 
     with st.sidebar:
         # ── Client badge ────────────────────────────────────────
@@ -2700,19 +2625,6 @@ def main():
             st.rerun()
 
         st.divider()
-
-        # Portfolio switcher — lets one login flip between several
-        # portfolios (e.g. RW / PRO / MIDCAP) instead of needing a
-        # separate login per portfolio. Only shown when this client has
-        # more than one portfolio configured.
-        if len(portfolio_ids) > 1:
-            st.selectbox(
-                "📁 Portfolio",
-                options=portfolio_ids,
-                format_func=lambda k: portfolios[k].get("display_name", k),
-                key=pf_key,
-            )
-            st.divider()
 
         # Admin: let them pick a different client to view
         if is_admin():
