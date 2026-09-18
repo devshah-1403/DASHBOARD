@@ -1017,16 +1017,160 @@ def _parse_rollover_grid(values):
     return by_stock
 
 
+# ── Shared live feed: ONE Angel One login + ONE websocket for the whole
+# app, shared by every client ───────────────────────────────────────────
+# Angel One's SmartAPI only allows a single live session per client code:
+# logging in a second time silently invalidates the previous JWT/feed
+# token, which drops that earlier websocket ("WebSocket connection
+# error"). Every client dashboard authenticates with the SAME broker
+# account (ANGEL_API_KEY / ANGEL_CLIENT_CODE / ANGEL_PASSWORD /
+# ANGEL_TOTP_SECRET are global secrets, not per-client), so each visitor
+# used to trigger their own login+socket and kick everyone else off.
+# SharedFeed logs in exactly once — cached process-wide via
+# st.cache_resource, so it's the same instance no matter how many
+# visitors/sessions hit the app — and multiplexes every client's tokens
+# over that one connection. Raw ticks (ltp/open/close/volume) are the
+# same for every client and are cached here; qty/avgPrice/mtm are
+# per-client and stay in each client's own LiveEngine (see snapshot()).
+class SharedFeed:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.latest_raw = {}       # token -> raw tick dict (ltp/open/close/volume/ts)
+        self.status = "starting"   # starting | live | disconnected | error
+        self.error = None
+        self.last_tick_ts = None
+        self._sws = None
+        self._connected = False
+        self._exch_by_token = {}   # token -> exchangeType, everything subscribed so far
+        self._pending = {}         # token -> exchangeType, registered but not yet subscribed
+        threading.Thread(target=self._login_and_connect, daemon=True).start()
+
+    def _login_and_connect(self):
+        try:
+            totp = pyotp.TOTP(st.secrets["ANGEL_TOTP_SECRET"]).now()
+            sc = SmartConnect(api_key=st.secrets["ANGEL_API_KEY"])
+            data = sc.generateSession(st.secrets["ANGEL_CLIENT_CODE"], st.secrets["ANGEL_PASSWORD"], totp)
+            if not data.get("status"):
+                with self.lock:
+                    self.status = "error"
+                    self.error = f"Angel One login failed: {data}"
+                return
+            jwt_token = data["data"]["jwtToken"]
+            feed_token = data["data"]["feedToken"]
+            self._start_ws(jwt_token, feed_token)
+        except Exception as e:
+            with self.lock:
+                self.status = "error"
+                self.error = str(e)
+
+    def _start_ws(self, jwt_token, feed_token):
+        sws = SmartWebSocketV2(
+            auth_token=jwt_token, api_key=st.secrets["ANGEL_API_KEY"],
+            client_code=st.secrets["ANGEL_CLIENT_CODE"], feed_token=feed_token,
+        )
+
+        def on_open(wsapp):
+            with self.lock:
+                self._connected = True
+                self.status = "live"
+                to_subscribe = dict(self._pending)
+                self._pending = {}
+            self._subscribe(to_subscribe)
+
+        def on_data(wsapp, message):
+            token = str(message.get("token"))
+            with self.lock:
+                prev = self.latest_raw.get(token, {})
+                now = datetime.now(IST)
+                self.latest_raw[token] = {
+                    "ltp": message.get("last_traded_price", 0) / 100.0,
+                    "prev_ltp": prev.get("ltp"),
+                    "close": (message.get("closed_price", 0) / 100.0 if message.get("closed_price") else prev.get("close")),
+                    "open": (message.get("open_price_of_the_day", 0) / 100.0 if message.get("open_price_of_the_day") else prev.get("open")),
+                    "volume": message.get("volume_trade_for_the_day"),
+                    "ts": now.isoformat(timespec="seconds"),
+                }
+                self.last_tick_ts = now
+
+        def on_error(wsapp, error):
+            with self.lock:
+                self.status = "error"
+                self.error = f"WebSocket error: {error}"
+
+        def on_close(wsapp, *a):
+            with self.lock:
+                self._connected = False
+                self.status = "disconnected"
+
+        sws.on_open = on_open
+        sws.on_data = on_data
+        sws.on_error = on_error
+        sws.on_close = on_close
+        with self.lock:
+            self._sws = sws
+        threading.Thread(target=sws.connect, daemon=True).start()
+
+    def _chunk(self, exch_by_token: dict):
+        by_exch = {}
+        for token, exch_type in exch_by_token.items():
+            by_exch.setdefault(exch_type, []).append(token)
+        batches, current, current_count = [], [], 0
+        for exch_type, tokens in by_exch.items():
+            for i in range(0, len(tokens), 200):
+                chunk = tokens[i:i + 200]
+                if current_count + len(chunk) > MAX_TOKENS_PER_SUBSCRIBE:
+                    batches.append(current)
+                    current, current_count = [], 0
+                current.append({"exchangeType": exch_type, "tokens": chunk})
+                current_count += len(chunk)
+        if current:
+            batches.append(current)
+        return batches
+
+    def _subscribe(self, exch_by_token: dict):
+        if not exch_by_token or self._sws is None:
+            return
+        for i, batch in enumerate(self._chunk(exch_by_token)):
+            self._sws.subscribe(f"feed_{int(time.time() * 1000)}_{i}", SUBSCRIBE_MODE, batch)
+            time.sleep(0.3)
+
+    def register(self, exch_by_token: dict):
+        """Add a client's tokens to the shared subscription. Safe to call
+        repeatedly (e.g. every time a client's engine is (re)built) —
+        tokens already subscribed are skipped, so this only ever grows
+        the subscription and never triggers a fresh login/reconnect."""
+        with self.lock:
+            new_tokens = {t: e for t, e in exch_by_token.items() if t not in self._exch_by_token}
+            self._exch_by_token.update(exch_by_token)
+            if not new_tokens:
+                return
+            if not self._connected:
+                self._pending.update(new_tokens)
+                return
+        self._subscribe(new_tokens)
+
+    def snapshot_for(self, tokens):
+        """Raw ticks for just `tokens` (one client's token set), plus the
+        last-tick timestamp across the whole shared feed (a fine liveness
+        indicator even though it may belong to another client's symbol)."""
+        with self.lock:
+            raw = {t: self.latest_raw[t] for t in tokens if t in self.latest_raw}
+            return raw, self.last_tick_ts
+
+
+@st.cache_resource(show_spinner=False)
+def get_shared_feed() -> "SharedFeed":
+    return SharedFeed()
+
+
 class LiveEngine:
     def __init__(self, ledger_rows, apps_script_url=None, ledger_sheet_name=None):
         self.lock = threading.Lock()
-        self.latest_prices = {}       # token -> tick dict
-        self.token_to_symbol = {}     # token -> meta
+        self.token_to_symbol = {}     # token -> meta (qty/avgPrice/segment/... for THIS client)
         self.closed_positions = []
         self.booked_mtm_total = 0.0
-        self.status = "starting"
-        self.error = None
-        self.last_tick_ts = None      # datetime of most recently received tick
+        self._own_status = "starting"  # this client's own ledger/token-resolve phase
+        self._own_error = None
         self.apps_script_url = apps_script_url
         # Your Code.gs reads one tab per client (e.g. the "Rohan" tab for
         # that client's ledger) via ?sheet=<tab name>. Rollover data is
@@ -1042,6 +1186,22 @@ class LiveEngine:
         # of blocking behind Streamlit's "connecting" spinner. The UI polls
         # self.status via the live fragment until this flips to "live".
         threading.Thread(target=self._start, args=(ledger_rows,), daemon=True).start()
+
+    @property
+    def status(self):
+        # While THIS client's own ledger/positions/token-resolve work is
+        # still running (or failed), that's authoritative. Once it's
+        # done, defer to the shared feed's connection state — that's the
+        # actual websocket, shared by every client.
+        if self._own_status in ("starting", "error"):
+            return self._own_status
+        return get_shared_feed().status
+
+    @property
+    def error(self):
+        if self._own_status == "error":
+            return self._own_error
+        return get_shared_feed().error
 
     def _load_rollovers(self):
         """Best-effort fetch of this client's Rollover tab, if one exists.
@@ -1082,8 +1242,8 @@ class LiveEngine:
 
             resolved, unresolved = resolve_all(open_positions, MASTER_CACHE_PATH, MASTER_CACHE_MAX_AGE_HOURS)
             if not resolved:
-                self.status = "error"
-                self.error = "Nothing resolved from the ledger — check symbol/exchange/expiry spelling."
+                self._own_status = "error"
+                self._own_error = "Nothing resolved from the ledger — check symbol/exchange/expiry spelling."
                 return
 
             for r in resolved:
@@ -1132,94 +1292,43 @@ class LiveEngine:
                 }
 
 
-            totp = pyotp.TOTP(st.secrets["ANGEL_TOTP_SECRET"]).now()
-            sc = SmartConnect(api_key=st.secrets["ANGEL_API_KEY"])
-            data = sc.generateSession(st.secrets["ANGEL_CLIENT_CODE"], st.secrets["ANGEL_PASSWORD"], totp)
-            if not data.get("status"):
-                self.status = "error"
-                self.error = f"Angel One login failed: {data}"
-                return
-            jwt_token = data["data"]["jwtToken"]
-            feed_token = data["data"]["feedToken"]
-
-            self._start_ws(jwt_token, feed_token, resolved)
-            self.status = "live"
+            # Register our tokens on the ONE shared Angel One
+            # login/websocket instead of logging in ourselves — see
+            # SharedFeed above for why per-client logins break things.
+            # Safe/cheap even if the shared feed is already live: it only
+            # subscribes whatever tokens aren't already covered.
+            get_shared_feed().register({r["token"]: r["exchangeType"] for r in resolved})
+            self._own_status = "live"
         except Exception as e:
-            self.status = "error"
-            self.error = str(e)
-
-    def _chunk(self, resolved):
-        by_exch = {}
-        for r in resolved:
-            by_exch.setdefault(r["exchangeType"], []).append(r["token"])
-        batches, current, current_count = [], [], 0
-        for exch_type, tokens in by_exch.items():
-            for i in range(0, len(tokens), 200):
-                chunk = tokens[i:i + 200]
-                if current_count + len(chunk) > MAX_TOKENS_PER_SUBSCRIBE:
-                    batches.append(current)
-                    current, current_count = [], 0
-                current.append({"exchangeType": exch_type, "tokens": chunk})
-                current_count += len(chunk)
-        if current:
-            batches.append(current)
-        return batches
-
-    def _start_ws(self, jwt_token, feed_token, resolved):
-        sws = SmartWebSocketV2(
-            auth_token=jwt_token, api_key=st.secrets["ANGEL_API_KEY"],
-            client_code=st.secrets["ANGEL_CLIENT_CODE"], feed_token=feed_token,
-        )
-        batches = self._chunk(resolved)
-
-        def on_open(wsapp):
-            for i, token_list in enumerate(batches):
-                sws.subscribe(f"feed_{i}", SUBSCRIBE_MODE, token_list)
-                time.sleep(0.3)
-
-        def on_data(wsapp, message):
-            token = str(message.get("token"))
-            meta = self.token_to_symbol.get(token, {})
-            with self.lock:
-                prev = self.latest_prices.get(token, {})
-                ltp = message.get("last_traded_price", 0) / 100.0
-                qty = meta.get("qty")
-                avg_price = meta.get("avgPrice")
-                now = datetime.now(IST)
-                tick = {
-                    "token": token, "symbol": meta.get("symbol", token),
-                    "exchange": meta.get("exchange", ""), "segment": meta.get("segment", "Other"),
-                    "positionType": meta.get("positionType", "LONG"), "expiry": meta.get("expiry", ""), "ltp": ltp,
-                    "optionType": meta.get("optionType", ""), "strike": meta.get("strike", ""),
-                    "instrumentType": meta.get("instrumentType", ""),
-                    "prev_ltp": prev.get("ltp"),
-                    "close": (message.get("closed_price", 0) / 100.0 if message.get("closed_price") else prev.get("close")),
-                    "open": (message.get("open_price_of_the_day", 0) / 100.0 if message.get("open_price_of_the_day") else prev.get("open")),
-                    "volume": message.get("volume_trade_for_the_day"), "qty": qty, "avgPrice": avg_price,
-                    "mtm": round((ltp - avg_price) * qty, 2) if (qty is not None and avg_price is not None) else None,
-                    "ts": now.isoformat(timespec="seconds"),
-                }
-                self.latest_prices[token] = tick
-                self.last_tick_ts = now
-
-        def on_error(wsapp, error):
-            with self.lock:
-                self.status = "error"
-                self.error = f"WebSocket error: {error}"
-
-        def on_close(wsapp, *a):
-            with self.lock:
-                self.status = "disconnected"
-
-        sws.on_open = on_open
-        sws.on_data = on_data
-        sws.on_error = on_error
-        sws.on_close = on_close
-        threading.Thread(target=sws.connect, daemon=True).start()
+            self._own_status = "error"
+            self._own_error = str(e)
 
     def snapshot(self):
-        with self.lock:
-            return list(self.latest_prices.values()), self.last_tick_ts
+        """Merge this client's own qty/avgPrice/segment metadata with the
+        raw ltp/open/close/volume ticks coming off the shared feed —
+        keeps mtm calculations correct per-client even when two clients
+        hold the same symbol at different qty/avg price."""
+        token_meta = self.token_to_symbol
+        raw, last_tick_ts = get_shared_feed().snapshot_for(token_meta.keys())
+        ticks = []
+        for token, meta in token_meta.items():
+            r = raw.get(token)
+            if not r:
+                continue
+            qty, avg_price, ltp = meta.get("qty"), meta.get("avgPrice"), r["ltp"]
+            ticks.append({
+                "token": token, "symbol": meta.get("symbol", token),
+                "exchange": meta.get("exchange", ""), "segment": meta.get("segment", "Other"),
+                "positionType": meta.get("positionType", "LONG"), "expiry": meta.get("expiry", ""), "ltp": ltp,
+                "optionType": meta.get("optionType", ""), "strike": meta.get("strike", ""),
+                "instrumentType": meta.get("instrumentType", ""),
+                "prev_ltp": r.get("prev_ltp"),
+                "close": r.get("close"), "open": r.get("open"), "volume": r.get("volume"),
+                "qty": qty, "avgPrice": avg_price,
+                "mtm": round((ltp - avg_price) * qty, 2) if (qty is not None and avg_price is not None) else None,
+                "ts": r.get("ts"),
+            })
+        return ticks, last_tick_ts
 
 
 @st.cache_resource(show_spinner="Fetching ledger from Google Sheet (Apps Script)...")
@@ -2526,6 +2635,12 @@ def main():
 
         if st.button("🔄 Restart feed / refetch sheet", use_container_width=True):
             get_engine.clear()
+            # Only reset the shared Angel One connection if it's actually
+            # down — everyone shares one feed now, so we don't want a
+            # routine per-client refresh to force a fresh broker login
+            # (and disrupt other viewers) when the feed is perfectly fine.
+            if get_shared_feed().status in ("error", "disconnected"):
+                get_shared_feed.clear()
             st.rerun()
         st.caption(f"Live tables refresh every {TICK_REFRESH_SECONDS}s, tick by tick.")
 
