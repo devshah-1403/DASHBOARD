@@ -48,7 +48,7 @@ EXCH_SEG_TO_WS_TYPE = {
 # with its series: SBIN-EQ, GAYAPROJ-BE, ... EQ is preferred when a stock has
 # it; the others (BE = trade-to-trade, etc.) are fallbacks. Bond/NCD series are
 # deliberately NOT in this list so a company's bond never gets picked as its stock.
-NSE_SERIES_PRIORITY = ["EQ", "BE", "BZ", "BL", "SM", "ST", "IL"]
+NSE_SERIES_PRIORITY = ["EQ", "BE", "BZ", "BL", "SM", "ST", "IL", "T" ]
 
 # A real master has ~100k+ rows. Anything smaller is a bad/partial download.
 MIN_MASTER_ROWS = 1000
