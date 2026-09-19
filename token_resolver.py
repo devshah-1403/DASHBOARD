@@ -44,18 +44,46 @@ EXCH_SEG_TO_WS_TYPE = {
     "CDS": 13,  # CDE_FO
 }
 
+# NSE cash-market series, best first. Angel One suffixes every NSE cash symbol
+# with its series: SBIN-EQ, GAYAPROJ-BE, ... EQ is preferred when a stock has
+# it; the others (BE = trade-to-trade, etc.) are fallbacks. Bond/NCD series are
+# deliberately NOT in this list so a company's bond never gets picked as its stock.
+NSE_SERIES_PRIORITY = ["EQ", "BE", "BZ", "BL", "SM", "ST", "IL"]
+
+# A real master has ~100k+ rows. Anything smaller is a bad/partial download.
+MIN_MASTER_ROWS = 1000
+
 
 def load_master(cache_path, max_age_hours):
+    # 1) Use the cache if it's fresh AND readable. A corrupt/truncated cache
+    #    (e.g. two sessions writing at once) is ignored and re-downloaded
+    #    instead of crashing every load with a JSON error.
     if os.path.exists(cache_path):
         age_hours = (time.time() - os.path.getmtime(cache_path)) / 3600
         if age_hours < max_age_hours:
-            with open(cache_path, "r") as f:
-                return json.load(f)
+            try:
+                with open(cache_path, "r") as f:
+                    data = json.load(f)
+                if isinstance(data, list) and len(data) > MIN_MASTER_ROWS:
+                    return data
+            except (json.JSONDecodeError, OSError, ValueError):
+                pass  # corrupt cache — fall through and re-download
+
+    # 2) Fresh download.
     resp = requests.get(MASTER_URL, timeout=60)
     resp.raise_for_status()
     data = resp.json()
-    with open(cache_path, "w") as f:
+    if not isinstance(data, list) or len(data) <= MIN_MASTER_ROWS:
+        raise ValueError(
+            f"Instrument master download looks incomplete ({len(data) if hasattr(data, '__len__') else '?'} rows)."
+        )
+
+    # 3) Write atomically: temp file first, then swap. A reader never sees a
+    #    half-written file, even if several sessions load at the same moment.
+    tmp_path = f"{cache_path}.{os.getpid()}.{int(time.time() * 1000)}.tmp"
+    with open(tmp_path, "w") as f:
         json.dump(data, f)
+    os.replace(tmp_path, cache_path)
     return data
 
 
@@ -106,6 +134,39 @@ CASH_TO_DERIV_EXCH_SEG = {
                    # must be looked up (and WS-subscribed) under NFO, not NSE.
 
 
+def _series_of(sym):
+    """'GAYAPROJ-BE' -> 'BE'; 'RELIANCE' (no suffix) -> ''."""
+    return sym.rsplit("-", 1)[1] if "-" in sym else ""
+
+
+def _pick_cash_equity(candidates, symbol, exchange):
+    """
+    Pick the cash-equity master row(s) for a symbol.
+
+    NSE: Angel One suffixes symbols with the series (-EQ, -BE, -BZ ...). Accept
+         any series in NSE_SERIES_PRIORITY and prefer EQ; bond/NCD series are
+         excluded so a company's bond never masquerades as its stock.
+    BSE: BSE scrips don't follow the NSE '-EQ' convention, so no suffix is
+         required; an exact symbol match is preferred.
+
+    Returns only the best-ranked candidate(s) (usually exactly one).
+    """
+    ok = [c for c in candidates if _norm(c.get("instrumenttype")) in ("", "EQ")]
+    ranked = []
+    if exchange == "NSE":
+        for c in ok:
+            s = _series_of(_norm(c.get("symbol")))
+            if s in NSE_SERIES_PRIORITY:
+                ranked.append((NSE_SERIES_PRIORITY.index(s), c))
+    else:  # BSE (and any other cash segment)
+        for c in ok:
+            ranked.append((0 if _norm(c.get("symbol")) == symbol else 1, c))
+    if not ranked:
+        return []
+    best = min(r for r, _ in ranked)
+    return [c for r, c in ranked if r == best]
+
+
 def resolve_row(master_by_name, row):
     """
     row: dict with keys Symbol, Exchange, InstrumentType, Expiry, OptionType (CE/PE/''), Strike (optional)
@@ -149,15 +210,9 @@ def resolve_row(master_by_name, row):
         # instrumenttype alone isn't enough to isolate the equity row: a
         # company's listed NCDs/bonds share the same 'name' and exch_seg
         # ('NSE') as the stock, and often carry the same blank/'EQ'
-        # instrumenttype too — so without a symbol check they slip through
-        # here and can get picked as the "equity" (e.g. a bond trading near
-        # its ₹1,00,000 face value getting resolved instead of the stock).
-        # Angel One's own equity symbol convention is always 'SYMBOL-EQ'.
-        filtered = [
-            c for c in filtered
-            if _norm(c.get("instrumenttype")) in ("", "EQ")
-            and _norm(c.get("symbol")).endswith("-EQ")
-        ]
+        # instrumenttype too. _pick_cash_equity handles NSE series (EQ first,
+        # then BE/BZ/... — bond series excluded) and BSE scrips.
+        filtered = _pick_cash_equity(filtered, symbol, exchange)
     elif is_fut:
         filtered = [c for c in filtered if _norm(c.get("instrumenttype")).startswith("FUT")]
         if expiry:
@@ -215,7 +270,8 @@ def build_name_index(master):
         idx.setdefault(key, []).append(m)
         # Also index by the raw symbol (helps for EQ rows where name==base symbol anyway)
         key2 = _norm(m.get("symbol"))
-        idx.setdefault(key2, []).append(m)
+        if key2 != key:  # BSE rows often have symbol == name; don't index the same row twice
+            idx.setdefault(key2, []).append(m)
     return idx
 
 
@@ -232,4 +288,5 @@ def resolve_all(excel_rows, cache_path, max_age_hours):
                   f"-> token={r['token']} exchangeType={r['exchangeType']}")
         else:
             unresolved.append(row)
+            print(f"UNRESOLVED: {row.get('Symbol')} ({row.get('Exchange')}, {row.get('InstrumentType')!r})")
     return resolved, unresolved
