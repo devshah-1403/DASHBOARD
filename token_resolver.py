@@ -50,6 +50,13 @@ EXCH_SEG_TO_WS_TYPE = {
 # deliberately NOT in this list so a company's bond never gets picked as its stock.
 NSE_SERIES_PRIORITY = ["EQ", "BE", "BZ", "BL", "SM", "ST", "IL"]
 
+# Debt-type NSE series: Sovereign Gold Bonds (GB), G-Secs (GS), T-Bills (TB) and
+# listed NCDs/bonds (series N0-N9, NA-NZ). They're accepted, but ranked BELOW
+# every equity series, so a company's stock always wins over its own bond;
+# a bond only resolves when there is no equity row for that symbol.
+NSE_BOND_SERIES = ["GB", "GS", "TB"]
+_NCD_SERIES_RE = re.compile(r"^N[0-9A-Z]$")
+
 # BSE trades scrips in "groups" (A, B, T, X, XT, Z, M, MT, P, R, F, IF, ...).
 # EVERY group is accepted — this order only decides which one wins if the same
 # company shows up under more than one group. Unknown groups rank last but are
@@ -170,9 +177,10 @@ def _pick_cash_equity(candidates, symbol, exchange):
     """
     Pick the cash-equity master row(s) for a symbol.
 
-    NSE: Angel One suffixes symbols with the series (-EQ, -BE, -BZ ...). Accept
-         any series in NSE_SERIES_PRIORITY and prefer EQ; bond/NCD series are
-         excluded so a company's bond never masquerades as its stock.
+    NSE: Angel One suffixes symbols with the series (-EQ, -BE, -BZ ...). Equity
+         series are preferred (EQ first); bond series (SGB -GB, G-Sec, NCDs)
+         are accepted only as a last resort, so a company's bond never
+         masquerades as its stock.
     BSE: ALL groups (A, B, T, X, XT, Z, M, MT, P, R, F, IF ...) are accepted,
          with or without a '-<group>' suffix. An exact symbol/scrip-code match
          wins; otherwise BSE_GROUP_PRIORITY breaks ties. Only derivative rows
@@ -188,6 +196,10 @@ def _pick_cash_equity(candidates, symbol, exchange):
             s = _series_of(_norm(c.get("symbol")))
             if s in NSE_SERIES_PRIORITY:
                 ranked.append(((NSE_SERIES_PRIORITY.index(s),), c))
+            elif s in NSE_BOND_SERIES:
+                ranked.append(((100 + NSE_BOND_SERIES.index(s),), c))
+            elif _NCD_SERIES_RE.match(s):
+                ranked.append(((200,), c))
     else:  # BSE (and any other cash segment)
         for c in candidates:
             it = _norm(c.get("instrumenttype"))
