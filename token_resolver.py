@@ -48,7 +48,14 @@ EXCH_SEG_TO_WS_TYPE = {
 # with its series: SBIN-EQ, GAYAPROJ-BE, ... EQ is preferred when a stock has
 # it; the others (BE = trade-to-trade, etc.) are fallbacks. Bond/NCD series are
 # deliberately NOT in this list so a company's bond never gets picked as its stock.
-NSE_SERIES_PRIORITY = ["EQ", "BE", "BZ", "BL", "SM", "ST", "IL", "T" ]
+NSE_SERIES_PRIORITY = ["EQ", "BE", "BZ", "BL", "SM", "ST", "IL"]
+
+# BSE trades scrips in "groups" (A, B, T, X, XT, Z, M, MT, P, R, F, IF, ...).
+# EVERY group is accepted — this order only decides which one wins if the same
+# company shows up under more than one group. Unknown groups rank last but are
+# still accepted, so nothing is missed.
+BSE_GROUP_PRIORITY = ["", "A", "B", "T", "X", "XT", "Z", "ZP", "M", "MT", "MS",
+                      "P", "R", "F", "IF", "IP", "W", "S", "SS", "ST", "TS", "Y", "GS"]
 
 # A real master has ~100k+ rows. Anything smaller is a bad/partial download.
 MIN_MASTER_ROWS = 1000
@@ -101,6 +108,19 @@ def _norm(s):
     return str(s).strip().upper() if s is not None else ""
 
 
+_NUMERIC_CODE_RE = re.compile(r"^\d+(\.0+)?$")
+
+
+def _norm_symbol(value):
+    """Normalise a sheet symbol. BSE scrips are often typed as their numeric
+    scrip code (e.g. 500325). Sheets/pandas can hand that back as a float
+    ('500325.0') — strip the '.0' so it still matches the master's token."""
+    s = _norm(value)
+    if _NUMERIC_CODE_RE.match(s):
+        return s.split(".")[0]
+    return s
+
+
 _EXPIRY_RE = re.compile(r"^\d{1,2}[A-Z]{3}\d{4}$")
 
 
@@ -139,6 +159,13 @@ def _series_of(sym):
     return sym.rsplit("-", 1)[1] if "-" in sym else ""
 
 
+def _bse_group(sym):
+    """BSE group suffix ('ABC-T' -> 'T'). Only 1-3 letter suffixes count, so a
+    hyphenated company name like 'BAJAJ-AUTO' isn't mistaken for a group."""
+    g = _series_of(sym)
+    return g if (g.isalpha() and len(g) <= 3) else ""
+
+
 def _pick_cash_equity(candidates, symbol, exchange):
     """
     Pick the cash-equity master row(s) for a symbol.
@@ -146,21 +173,31 @@ def _pick_cash_equity(candidates, symbol, exchange):
     NSE: Angel One suffixes symbols with the series (-EQ, -BE, -BZ ...). Accept
          any series in NSE_SERIES_PRIORITY and prefer EQ; bond/NCD series are
          excluded so a company's bond never masquerades as its stock.
-    BSE: BSE scrips don't follow the NSE '-EQ' convention, so no suffix is
-         required; an exact symbol match is preferred.
+    BSE: ALL groups (A, B, T, X, XT, Z, M, MT, P, R, F, IF ...) are accepted,
+         with or without a '-<group>' suffix. An exact symbol/scrip-code match
+         wins; otherwise BSE_GROUP_PRIORITY breaks ties. Only derivative rows
+         are excluded.
 
     Returns only the best-ranked candidate(s) (usually exactly one).
     """
-    ok = [c for c in candidates if _norm(c.get("instrumenttype")) in ("", "EQ")]
     ranked = []
     if exchange == "NSE":
-        for c in ok:
+        for c in candidates:
+            if _norm(c.get("instrumenttype")) not in ("", "EQ"):
+                continue
             s = _series_of(_norm(c.get("symbol")))
             if s in NSE_SERIES_PRIORITY:
-                ranked.append((NSE_SERIES_PRIORITY.index(s), c))
+                ranked.append(((NSE_SERIES_PRIORITY.index(s),), c))
     else:  # BSE (and any other cash segment)
-        for c in ok:
-            ranked.append((0 if _norm(c.get("symbol")) == symbol else 1, c))
+        for c in candidates:
+            it = _norm(c.get("instrumenttype"))
+            if it.startswith("FUT") or it.startswith("OPT"):
+                continue
+            sym = _norm(c.get("symbol"))
+            exact = sym == symbol or _norm(c.get("token")) == symbol
+            g = _bse_group(sym)
+            g_rank = BSE_GROUP_PRIORITY.index(g) if g in BSE_GROUP_PRIORITY else len(BSE_GROUP_PRIORITY)
+            ranked.append(((0 if exact else 1, g_rank), c))
     if not ranked:
         return []
     best = min(r for r, _ in ranked)
@@ -174,7 +211,7 @@ def resolve_row(master_by_name, row):
     these pass through unchanged onto the returned dict if present.
     Returns dict {symbol, exchange, exchangeType, token, [qty, avgPrice]} or None if unresolved.
     """
-    symbol = _norm(row.get("Symbol"))
+    symbol = _norm_symbol(row.get("Symbol"))
     exchange = _norm(row.get("Exchange"))  # the CASH exchange as typed in the sheet, e.g. 'NSE'
     instrument_type = _norm(row.get("InstrumentType"))  # EQ / FUT / OPT / F&O / FO (see below)
     expiry = _norm_expiry(row.get("Expiry"))
@@ -182,7 +219,12 @@ def resolve_row(master_by_name, row):
     strike = row.get("Strike")
     has_strike = strike not in (None, "", 0) and not (isinstance(strike, str) and _norm(strike) in ("", "-1", "0"))
 
-    candidates = master_by_name.get(symbol, [])
+    # Match by name/symbol, and — for numeric symbols like BSE scrip codes —
+    # ALSO by the master's token (Angel One's BSE token IS the scrip code).
+    candidates = list(master_by_name.get(symbol, []))
+    if symbol.isdigit():
+        seen = {id(c) for c in candidates}
+        candidates += [c for c in master_by_name.get("#" + symbol, []) if id(c) not in seen]
     if not candidates:
         return None
 
@@ -272,6 +314,12 @@ def build_name_index(master):
         key2 = _norm(m.get("symbol"))
         if key2 != key:  # BSE rows often have symbol == name; don't index the same row twice
             idx.setdefault(key2, []).append(m)
+        # Also index by token under a '#'-prefixed key, so a BSE scrip typed as
+        # its numeric scrip code (500325) resolves. Prefix avoids colliding
+        # with real names/symbols.
+        tok = _norm(m.get("token"))
+        if tok:
+            idx.setdefault("#" + tok, []).append(m)
     return idx
 
 
