@@ -225,6 +225,20 @@ def resolve_row(master_by_name, row):
     if symbol.isdigit():
         seen = {id(c) for c in candidates}
         candidates += [c for c in master_by_name.get("#" + symbol, []) if id(c) not in seen]
+    # Fallback for cash rows only: the master may list the scrip with a
+    # group/series suffix (e.g. 'MCDHOLDING-XT') under a different 'name', so
+    # the exact lookup above misses it. Match symbols that are exactly
+    # '<typed symbol>-<suffix>'. The '-' boundary keeps 'MCX' from matching
+    # 'MCXINDIA'.
+    if not candidates and instrument_type in ("", "EQ") and exchange in ("NSE", "BSE"):
+        pref = symbol + "-"
+        seen = set()
+        for k, v in master_by_name.items():
+            if k.startswith(pref):
+                for c in v:
+                    if id(c) not in seen:
+                        seen.add(id(c))
+                        candidates.append(c)
     if not candidates:
         return None
 
