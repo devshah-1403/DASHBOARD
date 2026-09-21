@@ -1038,7 +1038,7 @@ def _parse_rollover_grid(values):
 # Symbols that must always show under Bonds/ETF (add more here any time).
 BOND_ETF_SYMBOLS = {
     "SGBJAN29IX", "SGBMAY29I", "SILVERBEES", "SILVERIETF", "JUNIORBEES",
-    "NIFTYBEES", "BANKBEES", "CASHIETF", "GOLDBEES", "LIQUIDBEES",
+    "NIFTYBEES", "BANKBEES", "BANKNIFTY1", "CASHIETF", "GOLDBEES", "LIQUIDBEES",
 }
 _BOND_ETF_TYPES = {"BOND", "BONDS", "ETF", "SGB", "GSEC", "G-SEC", "GOLDBOND", "MF"}
 
