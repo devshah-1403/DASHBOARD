@@ -1032,6 +1032,23 @@ def _parse_rollover_grid(values):
 # over that one connection. Raw ticks (ltp/open/close/volume) are the
 # same for every client and are cached here; qty/avgPrice/mtm are
 # per-client and stay in each client's own LiveEngine (see snapshot()).
+# ETF / bond classification. The ledger's Type column (BOND / ETF / EQ) is
+# carried as InstrumentType; positions_builder tags every NSE cash row as
+# "Equity", which is why ETFs and SGBs never reached the Bonds/ETF tab.
+_BOND_ETF_TYPES = {"BOND", "BONDS", "ETF", "SGB", "GSEC", "G-SEC", "GOLDBOND", "MF"}
+
+
+def effective_segment(segment, instrument_type="", symbol=""):
+    """Return 'Bonds/ETF' for ETF/bond rows; otherwise keep the segment."""
+    if segment == "F&O":
+        return segment
+    it = str(instrument_type or "").strip().upper()
+    sym = str(symbol or "").strip().upper()
+    if it in _BOND_ETF_TYPES or sym.startswith("SGB") or sym.endswith("BEES") or sym.endswith("ETF"):
+        return "Bonds/ETF"
+    return segment
+
+
 class SharedFeed:
     def __init__(self):
         self.lock = threading.Lock()
@@ -1275,7 +1292,8 @@ class LiveEngine:
                 self.token_to_symbol[r["token"]] = {
                     "symbol": r["symbol"], "exchange": r["exchange"],
                     "qty": r.get("qty"), "avgPrice": r.get("avgPrice"),
-                    "segment": src.get("Segment", "Other"),
+                    "segment": effective_segment(src.get("Segment", "Other"),
+                                                 src.get("InstrumentType", ""), r.get("symbol", "")),
                     "positionType": src.get("PositionType", "LONG"),
                     # Expiry may come back from the instrument-master lookup
                     # (F&O tokens resolve with an expiry) or from the ledger
@@ -2308,6 +2326,8 @@ def render_live(engine: "LiveEngine"):
                     </summary>
                 """)
 
+            for c in closed:
+                c["Segment"] = effective_segment(c.get("Segment"), c.get("InstrumentType", ""), c.get("Symbol", ""))
             closed_equity = [c for c in closed if c.get("Segment") == "Equity"]
             closed_fo = [c for c in closed if c.get("Segment") == "F&O"]
             closed_segments = [("Equity", closed_equity), ("F&O", closed_fo)]
