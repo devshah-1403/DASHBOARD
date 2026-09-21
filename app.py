@@ -1035,6 +1035,11 @@ def _parse_rollover_grid(values):
 # ETF / bond classification. The ledger's Type column (BOND / ETF / EQ) is
 # carried as InstrumentType; positions_builder tags every NSE cash row as
 # "Equity", which is why ETFs and SGBs never reached the Bonds/ETF tab.
+# Symbols that must always show under Bonds/ETF (add more here any time).
+BOND_ETF_SYMBOLS = {
+    "SGBJAN29IX", "SGBMAY29I", "SILVERBEES", "SILVERIETF", "JUNIORBEES",
+    "NIFTYBEES", "BANKBEES", "CASHIETF", "GOLDBEES", "LIQUIDBEES",
+}
 _BOND_ETF_TYPES = {"BOND", "BONDS", "ETF", "SGB", "GSEC", "G-SEC", "GOLDBOND", "MF"}
 
 
@@ -1043,8 +1048,10 @@ def effective_segment(segment, instrument_type="", symbol=""):
     if segment == "F&O":
         return segment
     it = str(instrument_type or "").strip().upper()
-    sym = str(symbol or "").strip().upper()
-    if it in _BOND_ETF_TYPES or sym.startswith("SGB") or sym.endswith("BEES") or sym.endswith("ETF"):
+    # Angel One trading symbols carry a series suffix ("SILVERBEES-EQ");
+    # strip it so name-based matching sees the bare ETF name.
+    sym = re.sub(r"-(EQ|BE|BL|BZ|SM|N\d)$", "", str(symbol or "").strip().upper())
+    if sym in BOND_ETF_SYMBOLS or it in _BOND_ETF_TYPES or sym.startswith("SGB") or sym.endswith("BEES") or sym.endswith("ETF"):
         return "Bonds/ETF"
     return segment
 
@@ -1289,6 +1296,17 @@ class LiveEngine:
                     # Equity, where symbol formats do line up).
                     src = next((p for p in open_positions
                                 if p["Symbol"] == r["symbol"] and p["Exchange"] == r["exchange"]), {})
+                # If the Exchange+Qty+AvgPrice join missed (or missed the
+                # type), look the ledger row up by bare symbol so its
+                # BOND/ETF type still gets through.
+                if not src or not src.get("InstrumentType"):
+                    _base = re.sub(r"-(EQ|BE|BL|BZ|SM|N\d)$", "", str(r["symbol"]).upper())
+                    _alt = next((p for p in open_positions
+                                 if str(p.get("Symbol", "")).upper() == _base
+                                 and p.get("InstrumentType")), None)
+                    if _alt:
+                        src = {**src, "InstrumentType": _alt["InstrumentType"],
+                               "Segment": src.get("Segment") or _alt.get("Segment", "Other")}
                 self.token_to_symbol[r["token"]] = {
                     "symbol": r["symbol"], "exchange": r["exchange"],
                     "qty": r.get("qty"), "avgPrice": r.get("avgPrice"),
@@ -1873,6 +1891,8 @@ def render_live(engine: "LiveEngine"):
         unsafe_allow_html=True,
     )
 
+    for t in ticks:
+        t["segment"] = effective_segment(t.get("segment"), t.get("instrumentType", ""), t.get("symbol", ""))
     equity = [t for t in ticks if t.get("segment") == "Equity"]
     bonds_etf = [t for t in ticks if t.get("segment") not in ("Equity", "F&O")]
     fo_all = [t for t in ticks if t.get("segment") == "F&O"]
