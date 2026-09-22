@@ -403,11 +403,6 @@ def inject_theme():
             background: rgba(124,92,255,0.08); cursor: default;
             padding: 1px 5px; font-size: 0.68rem; line-height: 1;
         }
-        .pt-tag.intraday {
-            color: #f5b942; border-color: rgba(245,185,66,0.35);
-            background: rgba(245,185,66,0.10); cursor: default;
-            padding: 1px 5px; font-size: 0.68rem; line-height: 1;
-        }
         .pt-cell { font-family: 'Calibri', 'Carlito', 'Segoe UI', sans-serif; font-size: 0.85rem; font-weight: 600; }
         .pt-cell.muted { color: var(--muted); font-weight: 500; font-size: 0.78rem; }
         .pt-cell.pos { color: var(--pos); }
@@ -1829,29 +1824,6 @@ def rollover_badge_html(symbol: str, rollovers: dict) -> str:
     return f'<span class="pt-tag rolled" title="{_html_escape(tooltip, quote=True)}">🔄 Rolled</span>'
 
 
-def intraday_badge_html(c: dict) -> str:
-    """A small '⚡ Intraday' pill for a closed EQUITY position where the
-    same script was bought and sold on the same calendar date (jobbing-style
-    trades — see positions_builder.build_positions' per-leg 'Intraday' flag).
-    FIFO matching itself is never touched by this — it's a display tag laid
-    on top of the already-matched Trades legs. When every realized leg for
-    the contract was same-day, shows the plain tag; when only some legs
-    were, shows a partial "x/y" count so a mixed position (e.g. one same-day
-    lot plus one carried-over lot) isn't mislabeled as fully intraday."""
-    if c.get("Segment") != "Equity":
-        return ""
-    total = c.get("TotalLegs", 0)
-    done = c.get("IntradayLegs", 0)
-    if not done:
-        return ""
-    if c.get("Intraday"):
-        return '<span class="pt-tag intraday" title="Bought and sold on the same date">⚡ Intraday</span>'
-    return (
-        f'<span class="pt-tag intraday" title="{done} of {total} legs bought and sold same-day">'
-        f'⚡ Intraday ({done}/{total})</span>'
-    )
-
-
 def alt_dark(chart):
     """Apply a shared dark, transparent-background theme to an Altair chart."""
     return (
@@ -2300,13 +2272,11 @@ def render_live(engine: "LiveEngine"):
                 else:
                     leader_badge = ""
                 sell_date = fmt_sell_date(_closed_sell_date(c))
-                intraday_badge = intraday_badge_html(c)
                 return flat(f"""
                     <div class="{row_cls}">
                         <div class="pt-symbol">
                             <span class="pt-symbol-name">{c.get('Symbol', '-')}</span>
                             {leader_badge}
-                            {intraday_badge}
                         </div>
                         <div class="pt-cell muted">{c.get('Exchange', '-')}</div>
                         <div class="pt-cell">{fmt_qty(c.get('Qty'))}</div>
