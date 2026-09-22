@@ -132,18 +132,6 @@ def _fmt_date(d):
     return ts.strftime("%Y-%m-%d")
 
 
-def _same_calendar_day(d1, d2):
-    """True if two date-ish values fall on the same calendar date. Used to
-    flag a FIFO-matched leg as intraday (bought and sold the same day) —
-    purely a display/tagging signal, never changes which buy lot a sell
-    consumes, so the FIFO matching itself is completely untouched."""
-    a = pd.to_datetime(d1, errors="coerce")
-    b = pd.to_datetime(d2, errors="coerce")
-    if pd.isna(a) or pd.isna(b):
-        return False
-    return a.normalize() == b.normalize()
-
-
 def _fifo_match(buys, sells):
     """
     buys/sells: lists of {"qty","price","date"}, already sorted oldest-first.
@@ -152,10 +140,7 @@ def _fifo_match(buys, sells):
                        each {"qty","price","date"} — qty may be 0 for fully-consumed lots.
       matched_trades: one entry per FIFO match segment (a single sell can span
                        multiple buy lots, producing multiple entries) —
-                       {"qty","buy_price","buy_date","sell_price","sell_date",
-                       "is_intraday"} — is_intraday is True when that
-                       particular leg's buy_date and sell_date are the same
-                       calendar day (same script, same-day round trip).
+                       {"qty","buy_price","buy_date","sell_price","sell_date"}.
       oversold_qty: total sell quantity beyond total buys (i.e. sold short —
                     there was no buy lot left to match against).
       oversold_lots: the same excess broken out per sell row as
@@ -185,10 +170,6 @@ def _fifo_match(buys, sells):
                 "buy_date": lot["date"],
                 "sell_price": sell["price"],
                 "sell_date": sell["date"],
-                # Same script, bought and sold on the same calendar date —
-                # a jobbing/intraday leg. Purely informational: FIFO
-                # matching above is unaffected either way.
-                "is_intraday": _same_calendar_day(lot["date"], sell["date"]),
             })
             lot["qty"] -= consume
             remaining_sell_qty -= consume
@@ -279,28 +260,13 @@ def build_positions(rows, verbose=True):
                 "SellPrice": round(m["sell_price"], 4),
                 "SellDate": _fmt_date(m["sell_date"]),
                 "Pnl": round(m["qty"] * (m["sell_price"] - m["buy_price"]), 2),
-                "Intraday": m["is_intraday"],
             } for m in matched_trades]
-
-            # Roll the per-leg intraday flags up to the contract level. A
-            # contract is only tagged "Intraday" outright when EVERY realized
-            # leg was a same-day round trip (e.g. the JOBBING sheet pattern —
-            # bought and sold the same script on the same date); when only
-            # some legs qualify, IntradayLegs/TotalLegs lets the caller show
-            # a partial count instead of mislabeling the whole position.
-            # Equity-only per the ledger convention, same as _segment_for.
-            intraday_legs = sum(1 for m in matched_trades if m["is_intraday"])
-            total_legs = len(matched_trades)
-
             closed_positions.append({
                 "Symbol": symbol, "Exchange": exchange, "InstrumentType": instrument_type,
                 "Expiry": expiry, "OptionType": option_type, "Strike": strike, "Segment": segment,
                 "Qty": round(realized_qty, 4), "AvgBuyPrice": round(avg_buy, 4),
                 "AvgSellPrice": round(avg_sell, 4), "BookedPnL": round(booked_pnl, 2),
                 "Trades": trades_out,  # per-FIFO-leg breakdown, newest/oldest order as matched
-                "IntradayLegs": intraday_legs,
-                "TotalLegs": total_legs,
-                "Intraday": segment == "Equity" and total_legs > 0 and intraday_legs == total_legs,
             })
 
     return open_positions, closed_positions
