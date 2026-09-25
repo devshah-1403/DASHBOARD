@@ -95,11 +95,12 @@ def _fetch_ledger_records(apps_script_url: str, sheet_name: str | None = None, r
     raise last_err
 
 def _extract_actual_prices(records) -> dict:
-    """Symbol -> 'Actual Price' parsed from a list of header-keyed row
-    dicts (as returned by Code.gs for the dedicated '<ledger tab> Actual
-    Price' sheet — see LiveEngine._load_actual_prices). Expects just two
-    columns: Symbol, Actual Price. A symbol can repeat if corrected later
-    — the last non-blank value wins."""
+    """Symbol -> manually entered 'Actual Price' from the main ledger
+    sheet's own 'Actual Price' column (alongside Buy Price / Actual
+    Profit). Code.gs reads every column by header name, so this is just
+    another key on each row dict — no separate tab, no change to
+    Code.gs needed. Not every row will have it filled in; a symbol can
+    appear on several rows, and the last non-blank value wins."""
     out: dict = {}
     if not isinstance(records, list):
         return out
@@ -397,6 +398,18 @@ def inject_theme():
         .pos-table-head.cols-open-opt, .pos-table-row.cols-open-opt {
             grid-template-columns: 1.7fr 0.65fr 0.5fr 0.8fr 0.7fr 0.9fr 0.9fr 0.8fr 1.1fr 0.9fr;
         }
+        /* PRO-only variants — same columns as above plus Actual Price and
+           Actual MTM appended at the end, so non-PRO rows/positions keep
+           their existing layout untouched. Relies on .pos-table-wrap's
+           overflow-x:auto for narrow screens rather than the stacked
+           mobile card layout below (which is scoped to the base
+           .cols-open/.cols-open-opt classes only). */
+        .pos-table-head.cols-open-pro, .pos-table-row.cols-open-pro {
+            grid-template-columns: 2fr 0.8fr 0.8fr 1fr 1fr 1fr 1.2fr 1fr 1fr 1fr;
+        }
+        .pos-table-head.cols-open-opt-pro, .pos-table-row.cols-open-opt-pro {
+            grid-template-columns: 1.7fr 0.65fr 0.5fr 0.8fr 0.7fr 0.9fr 0.9fr 0.8fr 1.1fr 0.9fr 1fr 1fr;
+        }
         .pos-table-head.cols-closed, .pos-table-row.cols-closed {
             grid-template-columns: 1.5fr 0.8fr 0.8fr 1fr 1fr 1fr 1.2fr;
         }
@@ -434,15 +447,6 @@ def inject_theme():
         .pt-cell.pos { color: var(--pos); }
         .pt-cell.neg { color: var(--neg); }
         .pt-arrow { font-size: 0.72rem; margin-right: 2px; }
-        /* Small "Actual MTM" sub-line under the normal MTM figure —
-           PRO-only, shown when the ledger's Actual Price column overrides
-           the broker average for that symbol. */
-        .pt-cell-sub {
-            font-size: 0.68rem; font-weight: 600; margin-top: 2px;
-            opacity: 0.85; letter-spacing: 0.01em;
-        }
-        .pt-cell-sub.pos { color: var(--pos); }
-        .pt-cell-sub.neg { color: var(--neg); }
 
         /* Leader row (top gain / least loss) — no box, just a soft glowing
            left accent bar + tinted background so it stands out among plain
@@ -1240,7 +1244,7 @@ def get_shared_feed() -> "SharedFeed":
 
 
 class LiveEngine:
-    def __init__(self, ledger_rows, apps_script_url=None, ledger_sheet_name=None):
+    def __init__(self, ledger_rows, apps_script_url=None, ledger_sheet_name=None, raw_records=None):
         self.lock = threading.Lock()
         self.token_to_symbol = {}     # token -> meta (qty/avgPrice/segment/... for THIS client)
         self.closed_positions = []
@@ -1250,11 +1254,12 @@ class LiveEngine:
         self.apps_script_url = apps_script_url
         self.ledger_sheet_name = ledger_sheet_name
         # Optional per-symbol "Actual Price" override — PRO accounts only
-        # (see is_pro_account). Lives in its own '<ledger tab> Actual
-        # Price' sheet tab, fetched in the background by
-        # _load_actual_prices() (same pattern as Rollover); empty until
-        # that finishes.
-        self.actual_price_by_symbol = {}
+        # (see is_pro_account). Just a normal extra column, "Actual
+        # Price", in the same main ledger tab (Code.gs is header-keyed,
+        # so it reads it like any other column). Computed synchronously
+        # here since raw_records is already in memory from get_engine —
+        # no extra network round trip needed.
+        self.actual_price_by_symbol = _extract_actual_prices(raw_records)
         # Your Code.gs reads one tab per client (e.g. the "Rohan" tab for
         # that client's ledger) via ?sheet=<tab name>. Rollover data is
         # per-client too ("I will add rollover sheet as per client name"),
@@ -1316,38 +1321,12 @@ class LiveEngine:
         with self.lock:
             self.rollovers = by_stock
 
-    def _load_actual_prices(self):
-        """Best-effort fetch of this client's '<ledger tab> Actual Price'
-        tab, if one exists — a separate sheet tab (Symbol, Actual Price
-        columns only), not a column squeezed into the main ledger. This
-        keeps the main ledger tab's layout untouched — Code.gs already
-        reads columns by header name so it wouldn't strictly break either
-        way, but a dedicated tab is simpler for a client to maintain and
-        matches how "<ledger tab> Rollover" already works.
-
-        Most clients won't have this tab, so a 404 ("Sheet not found") or
-        any other failure here is swallowed — same as _load_rollovers,
-        this must never break the main ledger/positions load, it only
-        enables the PRO-only Actual MTM figures once a client's tab has
-        real data in it."""
-        if not self.apps_script_url or not self.ledger_sheet_name:
-            return
-        tab_name = f"{self.ledger_sheet_name} Actual Price"
-        try:
-            records = _fetch_ledger_records(self.apps_script_url, tab_name)
-        except Exception:
-            return
-        prices = _extract_actual_prices(records)
-        with self.lock:
-            self.actual_price_by_symbol = prices
-
     def _start(self, ledger_rows):
         try:
             open_positions, closed_positions = build_positions(ledger_rows, verbose=False)
             self.closed_positions = closed_positions
             self.booked_mtm_total = round(sum(c["BookedPnL"] for c in closed_positions), 2)
             self._load_rollovers()
-            self._load_actual_prices()
 
             resolved, unresolved = resolve_all(open_positions, MASTER_CACHE_PATH, MASTER_CACHE_MAX_AGE_HOURS)
             if not resolved:
@@ -1463,7 +1442,7 @@ class LiveEngine:
 def get_engine(apps_script_url: str, sheet_name: str | None):
     records = _fetch_ledger_records(apps_script_url, sheet_name)
     rows = load_trade_ledger_from_records(records)
-    return LiveEngine(rows, apps_script_url=apps_script_url, ledger_sheet_name=sheet_name)
+    return LiveEngine(rows, apps_script_url=apps_script_url, ledger_sheet_name=sheet_name, raw_records=records)
 
 
 # ── News ─────────────────────────────────────────────────────────────────
@@ -2173,6 +2152,8 @@ def render_live(engine: "LiveEngine"):
                 # one still gets marked so there's always a clear leader.
                 is_top = idx == 0 and day_pct is not None
                 row_variant = "cols-open-opt" if is_options else "cols-open"
+                if is_pro_view:
+                    row_variant += "-pro"
                 row_cls = f"pos-table-row {row_variant} top-gain-row" if is_top else f"pos-table-row {row_variant}"
                 if is_top and day_pct > 0:
                     leader_badge = f'<span class="pt-leader-badge">🔥 Top Gain</span>'
@@ -2183,14 +2164,25 @@ def render_live(engine: "LiveEngine"):
                 mtm = r.get("mtm")
                 mtm_cls = "pt-cell pos" if (mtm or 0) >= 0 else "pt-cell neg"
                 mtm_arrow = "▲" if (mtm or 0) >= 0 else "▼"
-                # PRO-only: small sub-line showing MTM re-priced off this
-                # symbol's manually entered Actual Price, when one is set.
-                actual_mtm = r.get("actualMtm")
-                actual_sub = ""
-                if is_pro_view and actual_mtm is not None:
-                    a_cls = "pt-cell-sub pos" if actual_mtm >= 0 else "pt-cell-sub neg"
-                    a_arrow = "▲" if actual_mtm >= 0 else "▼"
-                    actual_sub = f'<div class="{a_cls}">Actual {a_arrow} {fmt_money(actual_mtm)}</div>'
+                # PRO-only: two extra trailing cells — Actual Price (the
+                # manually entered override for this symbol, if any) and
+                # Actual MTM (recomputed off it). Blank ("–") when this
+                # symbol has no override set.
+                pro_cells = ""
+                if is_pro_view:
+                    actual_price = r.get("actualPrice")
+                    actual_mtm = r.get("actualMtm")
+                    ap_txt = fmt_money(actual_price) if actual_price is not None else "–"
+                    if actual_mtm is not None:
+                        am_cls = "pt-cell pos" if actual_mtm >= 0 else "pt-cell neg"
+                        am_arrow = "▲" if actual_mtm >= 0 else "▼"
+                        am_txt = f"{am_arrow} {fmt_money(actual_mtm)}"
+                    else:
+                        am_cls, am_txt = "pt-cell muted", "–"
+                    pro_cells = (
+                        f'<div class="pt-cell muted">{ap_txt}</div>'
+                        f'<div class="{am_cls}">{am_txt}</div>'
+                    )
                 roll_badge = rollover_badge_html(r.get("symbol", ""), engine.rollovers) if show_rollover else ""
                 symbol_label = _html_escape(contract_display(r)) if is_fo else _html_escape(str(r.get("symbol", "-")))
 
@@ -2214,8 +2206,9 @@ def render_live(engine: "LiveEngine"):
                             <div class="pt-cell">{fmt_money(r.get('avgPrice'))}</div>
                             <div class="pt-cell">{fmt_money(r.get('ltp'))}</div>
                             <div class="{day_cls}">{day_txt}</div>
-                            <div class="{mtm_cls}">{mtm_arrow} {fmt_money(mtm)}{actual_sub}</div>
+                            <div class="{mtm_cls}">{mtm_arrow} {fmt_money(mtm)}</div>
                             <div class="pt-cell muted">{fmt_datetime(r.get('ts'))}</div>
+                            {pro_cells}
                         </div>
                     """))
                 else:
@@ -2233,31 +2226,38 @@ def render_live(engine: "LiveEngine"):
                             <div class="pt-cell">{fmt_money(r.get('avgPrice'))}</div>
                             <div class="pt-cell">{fmt_money(r.get('ltp'))}</div>
                             <div class="{day_cls}">{day_txt}</div>
-                            <div class="{mtm_cls}">{mtm_arrow} {fmt_money(mtm)}{actual_sub}</div>
+                            <div class="{mtm_cls}">{mtm_arrow} {fmt_money(mtm)}</div>
                             <div class="pt-cell muted">{fmt_datetime(r.get('ts'))}</div>
+                            {pro_cells}
                         </div>
                     """))
             if is_options:
+                head_cls = "pos-table-head cols-open-opt-pro" if is_pro_view else "pos-table-head cols-open-opt"
+                pro_head = "<div>Actual Price</div><div>Actual MTM</div>" if is_pro_view else ""
                 table_html = flat(f"""
                     <div class="pos-table-wrap">
                         <div class="pos-table">
-                            <div class="pos-table-head cols-open-opt">
+                            <div class="{head_cls}">
                                 <div>Symbol</div><div>Strike</div><div>CE/PE</div><div>Expiry</div>
                                 <div>Qty</div><div>Avg Price</div><div>CMP</div><div>Day Chg %</div>
                                 <div>MTM P&amp;L</div><div>Last Tick</div>
+                                {pro_head}
                             </div>
                             {"".join(rows_html)}
                         </div>
                     </div>
                 """)
             else:
+                head_cls = "pos-table-head cols-open-pro" if is_pro_view else "pos-table-head cols-open"
+                pro_head = "<div>Actual Price</div><div>Actual MTM</div>" if is_pro_view else ""
                 table_html = flat(f"""
                     <div class="pos-table-wrap">
                         <div class="pos-table">
-                            <div class="pos-table-head cols-open">
+                            <div class="{head_cls}">
                                 <div>Symbol</div><div>{second_col_label}</div><div>Qty</div>
                                 <div>Avg Price</div><div>CMP</div><div>Day Chg %</div>
                                 <div>MTM P&amp;L</div><div>Last Tick</div>
+                                {pro_head}
                             </div>
                             {"".join(rows_html)}
                         </div>
