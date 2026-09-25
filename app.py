@@ -94,6 +94,41 @@ def _fetch_ledger_records(apps_script_url: str, sheet_name: str | None = None, r
             ) from e
     raise last_err
 
+def _extract_actual_prices(records) -> dict:
+    """Symbol -> manually entered 'Actual Price' from the ledger sheet.
+
+    This is an *optional* column PRO clients add themselves to a ledger
+    tab (alongside Buy Price) to record the true cost basis for a
+    symbol — e.g. after a bonus/split adjustment the broker's own
+    average no longer reflects reality. It's read straight off the raw
+    header-keyed rows Code.gs returns (records), BEFORE they go through
+    load_trade_ledger_from_records/build_positions, since those only
+    care about the FIFO-relevant columns and would drop anything extra.
+
+    Not every row will have it filled in, and a symbol can appear on
+    several ledger rows — the last non-blank value for a symbol wins,
+    since that's how a client would correct/update it in place.
+    """
+    out: dict = {}
+    if not isinstance(records, list):
+        return out
+    for row in records:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("Symbol", "")).strip().upper()
+        if not symbol:
+            continue
+        raw_val = row.get("Actual Price")
+        if raw_val in (None, "", "None"):
+            continue
+        try:
+            val = float(str(raw_val).replace(",", ""))
+        except (TypeError, ValueError):
+            continue
+        out[symbol] = val
+    return out
+
+
 st.set_page_config(
     page_title="Booked Profit Dashboard",
     page_icon="📊",
@@ -408,6 +443,15 @@ def inject_theme():
         .pt-cell.pos { color: var(--pos); }
         .pt-cell.neg { color: var(--neg); }
         .pt-arrow { font-size: 0.72rem; margin-right: 2px; }
+        /* Small "Actual MTM" sub-line under the normal MTM figure —
+           PRO-only, shown when the ledger's Actual Price column overrides
+           the broker average for that symbol. */
+        .pt-cell-sub {
+            font-size: 0.68rem; font-weight: 600; margin-top: 2px;
+            opacity: 0.85; letter-spacing: 0.01em;
+        }
+        .pt-cell-sub.pos { color: var(--pos); }
+        .pt-cell-sub.neg { color: var(--neg); }
 
         /* Leader row (top gain / least loss) — no box, just a soft glowing
            left accent bar + tinted background so it stands out among plain
@@ -964,6 +1008,23 @@ def is_admin() -> bool:
     return current_client_cfg().get("is_admin", False)
 
 
+def _is_pro_name(name) -> bool:
+    return str(name or "").strip().upper().startswith("PRO")
+
+
+def is_pro_account(engine: "LiveEngine | None" = None) -> bool:
+    """PRO accounts are identified purely by naming convention — no
+    separate secrets flag to keep in sync. True when either the logged-in
+    client id (e.g. 'PRO1') or the ledger sheet tab actually being
+    displayed (e.g. an admin viewing the 'PRO Rollover' client) starts
+    with 'PRO'."""
+    if _is_pro_name(st.session_state.get("_client_id", "")):
+        return True
+    if engine is not None and _is_pro_name(getattr(engine, "ledger_sheet_name", "")):
+        return True
+    return False
+
+
 # ── Background engine: login + FIFO build + token resolve + live WS feed ──
 _ROLLOVER_FIELDS = [
     "Date", "From Series", "To Series", "Qty Out",
@@ -1188,7 +1249,7 @@ def get_shared_feed() -> "SharedFeed":
 
 
 class LiveEngine:
-    def __init__(self, ledger_rows, apps_script_url=None, ledger_sheet_name=None):
+    def __init__(self, ledger_rows, apps_script_url=None, ledger_sheet_name=None, raw_records=None):
         self.lock = threading.Lock()
         self.token_to_symbol = {}     # token -> meta (qty/avgPrice/segment/... for THIS client)
         self.closed_positions = []
@@ -1196,6 +1257,12 @@ class LiveEngine:
         self._own_status = "starting"  # this client's own ledger/token-resolve phase
         self._own_error = None
         self.apps_script_url = apps_script_url
+        self.ledger_sheet_name = ledger_sheet_name
+        # Optional per-symbol "Actual Price" override — PRO accounts only
+        # (see is_pro_account). Harvested from the raw sheet rows here so
+        # it's available even though build_positions()/positions_builder.py
+        # doesn't know about this column.
+        self.actual_price_by_symbol = _extract_actual_prices(raw_records)
         # Your Code.gs reads one tab per client (e.g. the "Rohan" tab for
         # that client's ledger) via ?sheet=<tab name>. Rollover data is
         # per-client too ("I will add rollover sheet as per client name"),
@@ -1310,6 +1377,7 @@ class LiveEngine:
                 self.token_to_symbol[r["token"]] = {
                     "symbol": r["symbol"], "exchange": r["exchange"],
                     "qty": r.get("qty"), "avgPrice": r.get("avgPrice"),
+                    "actualPrice": self.actual_price_by_symbol.get(str(r["symbol"]).strip().upper()),
                     "segment": effective_segment(src.get("Segment", "Other"),
                                                  src.get("InstrumentType", ""), r.get("symbol", "")),
                     "positionType": src.get("PositionType", "LONG"),
@@ -1352,6 +1420,7 @@ class LiveEngine:
             if not r:
                 continue
             qty, avg_price, ltp = meta.get("qty"), meta.get("avgPrice"), r["ltp"]
+            actual_price = meta.get("actualPrice")
             ticks.append({
                 "token": token, "symbol": meta.get("symbol", token),
                 "exchange": meta.get("exchange", ""), "segment": meta.get("segment", "Other"),
@@ -1362,6 +1431,11 @@ class LiveEngine:
                 "close": r.get("close"), "open": r.get("open"), "volume": r.get("volume"),
                 "qty": qty, "avgPrice": avg_price,
                 "mtm": round((ltp - avg_price) * qty, 2) if (qty is not None and avg_price is not None) else None,
+                # PRO-only: MTM computed off the manually entered "Actual
+                # Price" instead of the broker average, when one was set
+                # for this symbol. None when no override exists.
+                "actualPrice": actual_price,
+                "actualMtm": round((ltp - actual_price) * qty, 2) if (qty is not None and actual_price is not None) else None,
                 "ts": r.get("ts"),
             })
         return ticks, last_tick_ts
@@ -1371,7 +1445,7 @@ class LiveEngine:
 def get_engine(apps_script_url: str, sheet_name: str | None):
     records = _fetch_ledger_records(apps_script_url, sheet_name)
     rows = load_trade_ledger_from_records(records)
-    return LiveEngine(rows, apps_script_url=apps_script_url, ledger_sheet_name=sheet_name)
+    return LiveEngine(rows, apps_script_url=apps_script_url, ledger_sheet_name=sheet_name, raw_records=records)
 
 
 # ── News ─────────────────────────────────────────────────────────────────
@@ -1938,6 +2012,23 @@ def render_live(engine: "LiveEngine"):
     day_pnl_total = eq_day + bonds_day + fut_day + opt_day
     day_pnl_pct = (day_pnl_total / investment_value * 100) if investment_value else 0.0
 
+    # PRO-only: same running/current MTM but using the manually entered
+    # "Actual Price" wherever one was set for a symbol, falling back to
+    # the normal broker-average MTM for every symbol that has no override
+    # — so this total is never short a position, just re-priced where the
+    # client corrected it.
+    is_pro_view = is_pro_account(engine)
+    current_actual_mtm = total_actual_mtm = None
+    if is_pro_view:
+        def _eff_actual_mtm(r):
+            am = r.get("actualMtm")
+            return am if am is not None else r.get("mtm")
+
+        current_actual_mtm = sum(
+            v for v in (_eff_actual_mtm(r) for r in ticks) if v is not None
+        )
+        total_actual_mtm = engine.booked_mtm_total + current_actual_mtm
+
     st.markdown(
         hero_block_dual(
             "Current MTM (Booked + Open)",
@@ -1952,20 +2043,28 @@ def render_live(engine: "LiveEngine"):
         ),
         unsafe_allow_html=True,
     )
-    st.markdown(
-        hero_tiles([
-            ("Investment Value", fmt_money(investment_value), ""),
-            (
-                "Today's P&L",
-                f"{fmt_money(day_pnl_total)} ({'+' if day_pnl_pct >= 0 else ''}{day_pnl_pct:.2f}%)",
-                "positive" if day_pnl_total >= 0 else "negative",
-            ),
-            ("Booked MTM", fmt_money(engine.booked_mtm_total), "positive" if engine.booked_mtm_total >= 0 else "negative"),
-            ("Open MTM", fmt_money(current_mtm), "positive" if current_mtm >= 0 else "negative"),
-            ("Current MTM", fmt_money(total_mtm), "positive" if total_mtm >= 0 else "negative"),
-        ]),
-        unsafe_allow_html=True,
-    )
+    hero_tile_items = [
+        ("Investment Value", fmt_money(investment_value), ""),
+        (
+            "Today's P&L",
+            f"{fmt_money(day_pnl_total)} ({'+' if day_pnl_pct >= 0 else ''}{day_pnl_pct:.2f}%)",
+            "positive" if day_pnl_total >= 0 else "negative",
+        ),
+        ("Booked MTM", fmt_money(engine.booked_mtm_total), "positive" if engine.booked_mtm_total >= 0 else "negative"),
+        ("Open MTM", fmt_money(current_mtm), "positive" if current_mtm >= 0 else "negative"),
+        ("Current MTM", fmt_money(total_mtm), "positive" if total_mtm >= 0 else "negative"),
+    ]
+    if is_pro_view:
+        # PRO-only tiles, re-priced off the ledger's Actual Price column.
+        hero_tile_items.append((
+            "Actual MTM (Open)", fmt_money(current_actual_mtm),
+            "positive" if current_actual_mtm >= 0 else "negative",
+        ))
+        hero_tile_items.append((
+            "Current MTM (Actual Price)", fmt_money(total_actual_mtm),
+            "positive" if total_actual_mtm >= 0 else "negative",
+        ))
+    st.markdown(hero_tiles(hero_tile_items), unsafe_allow_html=True)
 
     tab_open, tab_closed, tab_news = st.tabs(["📈 Open positions", "✅ Closed positions", "📰 News"])
 
@@ -2066,6 +2165,14 @@ def render_live(engine: "LiveEngine"):
                 mtm = r.get("mtm")
                 mtm_cls = "pt-cell pos" if (mtm or 0) >= 0 else "pt-cell neg"
                 mtm_arrow = "▲" if (mtm or 0) >= 0 else "▼"
+                # PRO-only: small sub-line showing MTM re-priced off this
+                # symbol's manually entered Actual Price, when one is set.
+                actual_mtm = r.get("actualMtm")
+                actual_sub = ""
+                if is_pro_view and actual_mtm is not None:
+                    a_cls = "pt-cell-sub pos" if actual_mtm >= 0 else "pt-cell-sub neg"
+                    a_arrow = "▲" if actual_mtm >= 0 else "▼"
+                    actual_sub = f'<div class="{a_cls}">Actual {a_arrow} {fmt_money(actual_mtm)}</div>'
                 roll_badge = rollover_badge_html(r.get("symbol", ""), engine.rollovers) if show_rollover else ""
                 symbol_label = _html_escape(contract_display(r)) if is_fo else _html_escape(str(r.get("symbol", "-")))
 
@@ -2089,7 +2196,7 @@ def render_live(engine: "LiveEngine"):
                             <div class="pt-cell">{fmt_money(r.get('avgPrice'))}</div>
                             <div class="pt-cell">{fmt_money(r.get('ltp'))}</div>
                             <div class="{day_cls}">{day_txt}</div>
-                            <div class="{mtm_cls}">{mtm_arrow} {fmt_money(mtm)}</div>
+                            <div class="{mtm_cls}">{mtm_arrow} {fmt_money(mtm)}{actual_sub}</div>
                             <div class="pt-cell muted">{fmt_datetime(r.get('ts'))}</div>
                         </div>
                     """))
@@ -2108,7 +2215,7 @@ def render_live(engine: "LiveEngine"):
                             <div class="pt-cell">{fmt_money(r.get('avgPrice'))}</div>
                             <div class="pt-cell">{fmt_money(r.get('ltp'))}</div>
                             <div class="{day_cls}">{day_txt}</div>
-                            <div class="{mtm_cls}">{mtm_arrow} {fmt_money(mtm)}</div>
+                            <div class="{mtm_cls}">{mtm_arrow} {fmt_money(mtm)}{actual_sub}</div>
                             <div class="pt-cell muted">{fmt_datetime(r.get('ts'))}</div>
                         </div>
                     """))
