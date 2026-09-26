@@ -405,10 +405,10 @@ def inject_theme():
            mobile card layout below (which is scoped to the base
            .cols-open/.cols-open-opt classes only). */
         .pos-table-head.cols-open-pro, .pos-table-row.cols-open-pro {
-            grid-template-columns: 2fr 0.8fr 0.8fr 1fr 1fr 1fr 1.2fr 1fr 1fr 1fr;
+            grid-template-columns: 2fr 0.8fr 0.8fr 1fr 1fr 1fr 1.2fr 1fr 1.2fr 1.3fr;
         }
         .pos-table-head.cols-open-opt-pro, .pos-table-row.cols-open-opt-pro {
-            grid-template-columns: 1.7fr 0.65fr 0.5fr 0.8fr 0.7fr 0.9fr 0.9fr 0.8fr 1.1fr 0.9fr 1fr 1fr;
+            grid-template-columns: 1.7fr 0.65fr 0.5fr 0.8fr 0.7fr 0.9fr 0.9fr 0.8fr 1.1fr 0.9fr 1.2fr 1.3fr;
         }
         .pos-table-head.cols-closed, .pos-table-row.cols-closed {
             grid-template-columns: 1.5fr 0.8fr 0.8fr 1fr 1fr 1fr 1.2fr;
@@ -442,7 +442,7 @@ def inject_theme():
             background: rgba(124,92,255,0.08); cursor: default;
             padding: 1px 5px; font-size: 0.68rem; line-height: 1;
         }
-        .pt-cell { font-family: 'Calibri', 'Carlito', 'Segoe UI', sans-serif; font-size: 0.85rem; font-weight: 600; }
+        .pt-cell { font-family: 'Calibri', 'Carlito', 'Segoe UI', sans-serif; font-size: 0.85rem; font-weight: 600; white-space: nowrap; }
         .pt-cell.muted { color: var(--muted); font-weight: 500; font-size: 0.78rem; }
         .pt-cell.pos { color: var(--pos); }
         .pt-cell.neg { color: var(--neg); }
